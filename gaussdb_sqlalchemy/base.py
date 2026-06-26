@@ -232,16 +232,21 @@ class GaussDBDialect(PGDialect):
 
     @classmethod
     def import_dbapi(cls):
-        """Import the gaussdb (psycopg3 fork) DBAPI module."""
+        """Import the gaussdb (psycopg3 fork) DBAPI module.
+
+        Return the gaussdb module itself (not gaussdb.dbapi20) because
+        SQLAlchemy expects standard DBAPI attributes (paramstyle, apilevel,
+        threadsafety, connect) on the returned module.  gaussdb.dbapi20 is a
+        compatibility shim that only provides type objects and adapter
+        registration — it lacks connect() and paramstyle.
+        """
         try:
-            import gaussdb   # noqa: F401
-            import gaussdb.dbapi20  # noqa: F401
-            return gaussdb.dbapi20
+            import gaussdb  # noqa: F401
+            return gaussdb
         except ImportError:
             try:
-                import psycopg
-                import psycopg.dbapi20
-                return psycopg.dbapi20
+                import psycopg  # noqa: F401
+                return psycopg
             except ImportError:
                 raise ImportError(
                     "The gaussdb dialect requires the 'gaussdb' package "
@@ -281,13 +286,38 @@ class GaussDBDialect(PGDialect):
         for key, value in opts.items():
             parts.append(f"{key}={value}")
 
+        # Force UTF8 client encoding — GaussDB defaults to SQL_ASCII which
+        # causes gaussdb/psycopg3 TextLoader to return bytes instead of str.
+        if not any(k.startswith("client_encoding") for k, _ in opts.items()):
+            parts.append("client_encoding=UTF8")
+
+        # Disable prepared statements entirely — psycopg3 auto-prepares
+        # after 5 executions and sends DEALLOCATE ALL on transaction
+        # boundaries, which M-compat GaussDB rejects.  prepare_threshold=None
+        # disables the feature at the protocol level so no DEALLOCATE is
+        # ever generated.  We also clear the cache on commit/rollback as a
+        # belt-and-suspenders measure (see do_rollback / do_commit).
+        # Use ClientCursor to send parameters in text format — GaussDB's
+        # binary protocol has issues with Numeric/BigInteger types.
         conninfo = " ".join(parts)
-        return ([conninfo], {})
+        import gaussdb as _gaussdb_mod
+        return ([conninfo], {"prepare_threshold": None, "cursor_factory": _gaussdb_mod.ClientCursor})
 
     def do_execute(self, cursor, statement, parameters, context=None):
         cursor.execute(statement, parameters)
 
     # ── Initialization ───────────────────────────────────────────────────────
+
+    def _get_server_version_info(self, connection):
+        """Return a conservative version tuple for PGDialect feature gating.
+
+        GaussDB's pg_catalog lacks many PostgreSQL 12+ columns
+        (attgenerated, indnullsnotdistinct, etc.) that SQLAlchemy's
+        reflection queries use when server_version_info >= (12,).
+        Returning (9, 2) ensures those code paths are skipped, matching
+        the actual PG-compat level of GaussDB's system catalogs.
+        """
+        return (9, 2)
 
     def initialize(self, connection):
         super().initialize(connection)
@@ -308,6 +338,45 @@ class GaussDBDialect(PGDialect):
             self.postfetch_lastrowid = False
             self.supports_native_boolean = True
 
+        # Re-create the identifier preparer now that gaussdb_compatibility
+        # is known.  The preparer is instantiated during PGDialect.initialize()
+        # (via super().initialize), before we set gaussdb_compatibility above,
+        # so it defaults to PG-style double-quote quoting.  For M mode we need
+        # backtick quoting.
+        self.preparer = GaussDBIdentifierPreparer(self)
+
+    def _gaussdb_connection(self, dbapi_conn):
+        """Return the underlying gaussdb Connection from a pool wrapper."""
+        # SQLAlchemy may wrap the connection; unwrap to get the raw DBAPI conn
+        if hasattr(dbapi_conn, "dbapi_connection"):
+            return dbapi_conn.dbapi_connection
+        return dbapi_conn
+
+    def _suppress_dealloc(self, dbapi_connection):
+        """Clear gaussdb's internal prepared-statement cache to prevent
+        DEALLOCATE ALL from being sent on commit/rollback.
+
+        gaussdb (psycopg3 fork) maintains a prepared-statement cache that
+        triggers ``DEALLOCATE ALL`` on transaction boundaries.  M-compat
+        GaussDB rejects this syntax.  We clear the cache unconditionally
+        because the prepared-statement optimisation is not needed and
+        causes compatibility issues across all modes.
+        """
+        conn = self._gaussdb_connection(dbapi_connection)
+        prepared = getattr(conn, "_prepared", None)
+        if prepared is not None:
+            prepared._to_flush.clear()
+            prepared._counts.clear()
+            prepared._names.clear()
+
+    def do_rollback(self, dbapi_connection):
+        self._suppress_dealloc(dbapi_connection)
+        super().do_rollback(dbapi_connection)
+
+    def do_commit(self, dbapi_connection):
+        self._suppress_dealloc(dbapi_connection)
+        super().do_commit(dbapi_connection)
+
     # ── Isolation level ──────────────────────────────────────────────────────
 
     def set_isolation_level(self, connection, level):
@@ -323,25 +392,568 @@ class GaussDBDialect(PGDialect):
         else:
             super().set_isolation_level(connection, level)
 
-    # ── Reflection overrides for M-compat ────────────────────────────────────
+    # ── Reflection overrides ─────────────────────────────────────────────────
+    #
+    # GaussDB's pg_catalog differs from PostgreSQL in two ways that break
+    # PGDialect's reflection queries:
+    #
+    # 1. A/B compat: the CASE WHEN ... (SELECT pg_type.typcollation ...) correlated
+    #    subquery in _columns_query is rejected ("invalid reference to FROM-clause
+    #    entry for table pg_type").
+    #
+    # 2. M compat: CAST(... AS TEXT) in _domain_query is rejected ("syntax error
+    #    at or near TEXT").
+    #
+    # Solution: override get_columns with a simpler pg_catalog query that avoids
+    # both problematic constructs.
 
     @reflection.cache
     def get_columns(self, connection, table_name, schema=None, **kw):
+        return self._gaussdb_get_columns(connection, table_name, schema, **kw)
+
+    def get_multi_columns(self, connection, schema=None, filter_names=None, scope=None, kind=None, **kw):
+        """Override PGDialect.get_multi_columns to use our safe query."""
+        if filter_names:
+            table_names = filter_names
+        else:
+            table_names = self.get_table_names(connection, schema=schema, scope=scope, kind=kind, **kw)
+
+        result = {}
+        for table_name in table_names:
+            cols = self._gaussdb_get_columns(connection, table_name, schema, **kw)
+            result[(schema, table_name)] = cols
+        return result
+
+    @reflection.cache
+    def get_pk_constraint(self, connection, table_name, schema=None, **kw):
+        """Override to avoid CAST AS TEXT in M-compat (PGDialect uses it in _constraint_query)."""
+        compat = self.gaussdb_compatibility
+        if compat != "M":
+            return super().get_pk_constraint(connection, table_name, schema, **kw)
+
+        # M compat: simple PK query without CAST AS TEXT
+        if schema is None:
+            schema = self.default_schema_name
+        sql_text = """
+            SELECT
+                a.attname AS column_name,
+                c.conname AS constraint_name
+            FROM pg_catalog.pg_constraint c
+            JOIN pg_catalog.pg_attribute a
+                ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+            JOIN pg_catalog.pg_class cl ON cl.oid = c.conrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = cl.relnamespace
+            WHERE c.contype = 'p'
+                AND cl.relname = :table_name
+                AND n.nspname = :schema
+            ORDER BY a.attnum
+        """
+        result = connection.execute(
+            text(sql_text),
+            {"table_name": table_name, "schema": schema or "public"},
+        )
+        cols = [row["column_name"] for row in result.mappings()]
+        return {"constrained_columns": cols, "name": None, "comment": None}
+
+    def get_multi_pk_constraint(self, connection, schema=None, filter_names=None, scope=None, kind=None, **kw):
+        """Override to avoid CAST AS TEXT in M-compat."""
+        compat = self.gaussdb_compatibility
+        if compat != "M":
+            return super().get_multi_pk_constraint(connection, schema=schema, filter_names=filter_names, scope=scope, kind=kind, **kw)
+
+        if filter_names:
+            table_names = filter_names
+        else:
+            table_names = self.get_table_names(connection, schema=schema, scope=scope, kind=kind, **kw)
+
+        result = {}
+        for table_name in table_names:
+            pk = self.get_pk_constraint(connection, table_name, schema=schema, **kw)
+            result[(schema, table_name)] = pk
+        return result
+
+    # ── M-compat reflection: avoid CAST AS TEXT / REGCLASS ───────────────────
+
+    def _m_simple_query(self, connection, sql, params):
+        """Execute a raw SQL query and return mapped rows."""
+        return connection.execute(text(sql), params).mappings().fetchall()
+
+    @reflection.cache
+    def get_unique_constraints(self, connection, table_name, schema=None, **kw):
+        compat = self.gaussdb_compatibility
+        if compat != "M":
+            return super().get_unique_constraints(connection, table_name, schema, **kw)
+        if schema is None:
+            schema = self.default_schema_name
+        # M compat: avoid WITH ORDINALITY / generate_subscripts in JOIN
+        sql_text = """
+            SELECT c.conname AS name, c.conkey, c.conrelid
+            FROM pg_catalog.pg_constraint c
+            JOIN pg_catalog.pg_class cl ON cl.oid = c.conrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = cl.relnamespace
+            WHERE c.contype = 'u'
+              AND cl.relname = :table_name
+              AND n.nspname = :schema
+        """
+        rows = self._m_simple_query(connection, sql_text, {"table_name": table_name, "schema": schema or "public"})
+        result = []
+        for r in rows:
+            conkey = r["conkey"]
+            if isinstance(conkey, (bytes, bytearray)):
+                conkey = conkey.decode()
+            attnums = [int(x) for x in str(conkey).strip("{}").split(",") if x.strip()]
+            col_names = []
+            for attnum in attnums:
+                col_sql = "SELECT a.attname FROM pg_catalog.pg_attribute a WHERE a.attrelid = :relid AND a.attnum = :attnum"
+                col_rows = self._m_simple_query(connection, col_sql, {"relid": r["conrelid"], "attnum": attnum})
+                if col_rows:
+                    name = col_rows[0]["attname"]
+                    if isinstance(name, (bytes, bytearray)):
+                        name = name.decode()
+                    col_names.append(name)
+            result.append({"name": r["name"], "column_names": col_names, "duplicates_index": None})
+        return result
+
+    @reflection.cache
+    def get_table_comment(self, connection, table_name, schema=None, **kw):
+        compat = self.gaussdb_compatibility
+        if compat != "M":
+            return super().get_table_comment(connection, table_name, schema, **kw)
+        if schema is None:
+            schema = self.default_schema_name
+        sql_text = """
+            SELECT d.description AS comment
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_catalog.pg_description d ON d.objoid = c.oid AND d.objsubid = 0
+            WHERE c.relname = :table_name AND n.nspname = :schema
+        """
+        rows = self._m_simple_query(connection, sql_text, {"table_name": table_name, "schema": schema or "public"})
+        comment = rows[0]["comment"] if rows and rows[0]["comment"] else None
+        return {"text": comment if not isinstance(comment, (bytes, bytearray)) else comment.decode() if comment else None}
+
+    @reflection.cache
+    def get_indexes(self, connection, table_name, schema=None, **kw):
         compat = self.gaussdb_compatibility
         if compat == "M":
-            return self._get_columns_m(connection, table_name, schema, **kw)
-        return super().get_columns(connection, table_name, schema, **kw)
+            return self._m_get_indexes(connection, table_name, schema)
+        return self._ab_get_indexes(connection, table_name, schema)
 
-    def _get_columns_m(self, connection, table_name, schema=None, **kw):
-        """M-compat column reflection: map blob→LargeBinary."""
-        columns = super().get_columns(connection, table_name, schema, **kw)
-        for col in columns:
-            type_obj = col["type"]
-            type_str = str(type_obj).lower()
-            # M mode: blob types should be LargeBinary
-            if "bytea" in type_str or "blob" in type_str:
-                col["type"] = sqltypes.LargeBinary()
+    def _m_get_indexes(self, connection, table_name, schema=None):
+        if schema is None:
+            schema = self.default_schema_name
+        # M compat: avoid WITH ORDINALITY and array subscripting in JOIN
+        sql_text = """
+            SELECT cl.relname AS index_name,
+                   idx.indisunique AS is_unique,
+                   idx.indkey AS indkey,
+                   idx.indrelid
+            FROM pg_catalog.pg_index idx
+            JOIN pg_catalog.pg_class cl ON cl.oid = idx.indexrelid
+            JOIN pg_catalog.pg_class tbl ON tbl.oid = idx.indrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = tbl.relnamespace
+            WHERE idx.indisprimary = false
+              AND tbl.relname = :table_name
+              AND n.nspname = :schema
+        """
+        rows = self._m_simple_query(connection, sql_text, {"table_name": table_name, "schema": schema or "public"})
+        result = []
+        for r in rows:
+            indkey = r["indkey"]
+            if isinstance(indkey, (bytes, bytearray)):
+                indkey = indkey.decode()
+            attnums = [int(x) for x in str(indkey).split() if x.strip()]
+            col_names = []
+            for attnum in attnums:
+                if attnum == 0:
+                    continue
+                col_sql = """
+                    SELECT a.attname FROM pg_catalog.pg_attribute a
+                    WHERE a.attrelid = :relid AND a.attnum = :attnum
+                """
+                col_rows = self._m_simple_query(connection, col_sql, {"relid": r["indrelid"], "attnum": attnum})
+                if col_rows:
+                    name = col_rows[0]["attname"]
+                    if isinstance(name, (bytes, bytearray)):
+                        name = name.decode()
+                    col_names.append(name)
+            result.append({
+                "name": r["index_name"],
+                "column_names": col_names,
+                "unique": bool(r["is_unique"]),
+                "include_columns": [],
+                "dialect_options": {},
+            })
+        return result
+
+    def get_multi_indexes(self, connection, schema=None, filter_names=None, scope=None, kind=None, **kw):
+        """Override to avoid CAST AS TEXT in M-compat and indoption type issues in A/B."""
+        compat = self.gaussdb_compatibility
+
+        if compat == "M":
+            if filter_names:
+                table_names = filter_names
+            else:
+                table_names = self.get_table_names(connection, schema=schema, scope=scope, kind=kind, **kw)
+            result = {}
+            for table_name in table_names:
+                idxs = self._m_get_indexes(connection, table_name, schema)
+                result[(schema, table_name)] = idxs
+            return result
+
+        # A/B compat: PGDialect.get_multi_indexes fails because gaussdb
+        # returns indoption as string instead of int. Use per-table get_indexes.
+        if filter_names:
+            table_names = filter_names
+        else:
+            table_names = self.get_table_names(connection, schema=schema, scope=scope, kind=kind, **kw)
+        result = {}
+        for table_name in table_names:
+            idxs = self._ab_get_indexes(connection, table_name, schema)
+            result[(schema, table_name)] = idxs
+        return result
+
+    def _ab_get_indexes(self, connection, table_name, schema=None):
+        """A/B compat index reflection without indoption bitwise ops."""
+        if schema is None:
+            schema = self.default_schema_name
+        sql_text = """
+            SELECT
+                cl.relname AS index_name,
+                idx.indisunique AS is_unique,
+                idx.indisvalid AS is_valid,
+                idx.indkey AS indkey,
+                idx.indrelid,
+                am.amname AS am_name
+            FROM pg_catalog.pg_index idx
+            JOIN pg_catalog.pg_class cl ON cl.oid = idx.indexrelid
+            JOIN pg_catalog.pg_class tbl ON tbl.oid = idx.indrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = tbl.relnamespace
+            LEFT JOIN pg_catalog.pg_am am ON am.oid = cl.relam
+            WHERE idx.indisprimary = false
+              AND tbl.relname = :table_name
+              AND n.nspname = :schema
+        """
+        rows = self._m_simple_query(connection, sql_text, {"table_name": table_name, "schema": schema or "public"})
+        result = []
+        for r in rows:
+            indkey = r["indkey"]
+            if isinstance(indkey, (bytes, bytearray)):
+                indkey = indkey.decode()
+            attnums = [int(x) for x in str(indkey).split() if x.strip()]
+            col_names = []
+            for attnum in attnums:
+                if attnum == 0:
+                    continue
+                col_rows = self._m_simple_query(connection,
+                    "SELECT a.attname FROM pg_catalog.pg_attribute a WHERE a.attrelid = :relid AND a.attnum = :attnum",
+                    {"relid": r["indrelid"], "attnum": attnum})
+                if col_rows:
+                    name = col_rows[0]["attname"]
+                    if isinstance(name, (bytes, bytearray)):
+                        name = name.decode()
+                    col_names.append(name)
+            is_unique = r["is_unique"]
+            if isinstance(is_unique, (bytes, bytearray)):
+                is_unique = is_unique.decode()
+            result.append({
+                "name": r["index_name"],
+                "column_names": col_names,
+                "unique": bool(is_unique),
+                "include_columns": [],
+                "dialect_options": {},
+            })
+        return result
+
+    def get_multi_unique_constraints(self, connection, schema=None, filter_names=None, scope=None, kind=None, **kw):
+        """Override to avoid CAST AS TEXT in M-compat."""
+        compat = self.gaussdb_compatibility
+        if compat != "M":
+            return super().get_multi_unique_constraints(connection, schema=schema, filter_names=filter_names, scope=scope, kind=kind, **kw)
+
+        if filter_names:
+            table_names = filter_names
+        else:
+            table_names = self.get_table_names(connection, schema=schema, scope=scope, kind=kind, **kw)
+
+        result = {}
+        for table_name in table_names:
+            uqs = self.get_unique_constraints(connection, table_name, schema=schema, **kw)
+            result[(schema, table_name)] = uqs
+        return result
+
+    def get_multi_foreign_keys(self, connection, schema=None, filter_names=None, scope=None, kind=None, **kw):
+        """Override to avoid CAST AS REGCLASS in M-compat."""
+        compat = self.gaussdb_compatibility
+        if compat != "M":
+            return super().get_multi_foreign_keys(connection, schema=schema, filter_names=filter_names, scope=scope, kind=kind, **kw)
+
+        if filter_names:
+            table_names = filter_names
+        else:
+            table_names = self.get_table_names(connection, schema=schema, scope=scope, kind=kind, **kw)
+
+        result = {}
+        for table_name in table_names:
+            fks = self.get_foreign_keys(connection, table_name, schema=schema, **kw)
+            result[(schema, table_name)] = fks
+        return result
+
+    @reflection.cache
+    def get_foreign_keys(self, connection, table_name, schema=None, **kw):
+        """Override to avoid CAST AS REGCLASS in M-compat."""
+        compat = self.gaussdb_compatibility
+        if compat != "M":
+            return super().get_foreign_keys(connection, table_name, schema, **kw)
+        if schema is None:
+            schema = self.default_schema_name
+        # M compat: simple FK query without CAST AS REGCLASS
+        sql_text = """
+            SELECT c.conname AS name,
+                   c.conkey,
+                   c.confkey,
+                   c.conrelid,
+                   c.confrelid,
+                   n.nspname AS ref_schema,
+                   cl.relname AS ref_table
+            FROM pg_catalog.pg_constraint c
+            JOIN pg_catalog.pg_class cl ON cl.oid = c.conrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = cl.relnamespace
+            JOIN pg_catalog.pg_class rcl ON rcl.oid = c.confrelid
+            WHERE c.contype = 'f'
+              AND cl.relname = :table_name
+              AND n.nspname = :schema
+        """
+        rows = self._m_simple_query(connection, sql_text, {"table_name": table_name, "schema": schema or "public"})
+        result = []
+        for r in rows:
+            conkey = r["conkey"]
+            if isinstance(conkey, (bytes, bytearray)):
+                conkey = conkey.decode()
+            confkey = r["confkey"]
+            if isinstance(confkey, (bytes, bytearray)):
+                confkey = confkey.decode()
+            con_attnums = [int(x) for x in str(conkey).strip("{}").split(",") if x.strip()]
+            conf_attnums = [int(x) for x in str(confkey).strip("{}").split(",") if x.strip()]
+            constrained_cols = []
+            referred_cols = []
+            for attnum in con_attnums:
+                col_rows = self._m_simple_query(connection, "SELECT a.attname FROM pg_catalog.pg_attribute a WHERE a.attrelid = :relid AND a.attnum = :attnum", {"relid": r["conrelid"], "attnum": attnum})
+                if col_rows:
+                    n = col_rows[0]["attname"]
+                    constrained_cols.append(n.decode() if isinstance(n, (bytes, bytearray)) else n)
+            for attnum in conf_attnums:
+                col_rows = self._m_simple_query(connection, "SELECT a.attname FROM pg_catalog.pg_attribute a WHERE a.attrelid = :relid AND a.attnum = :attnum", {"relid": r["confrelid"], "attnum": attnum})
+                if col_rows:
+                    n = col_rows[0]["attname"]
+                    referred_cols.append(n.decode() if isinstance(n, (bytes, bytearray)) else n)
+            result.append({
+                "name": r["name"],
+                "constrained_columns": constrained_cols,
+                "referred_schema": r["ref_schema"] if r["ref_schema"] != "public" else None,
+                "referred_table": r["ref_table"],
+                "referred_columns": referred_cols,
+                "options": {"ondelete": None, "onupdate": None, "deferrable": None, "initially": None, "match": None},
+            })
+        return result
+
+    def get_multi_check_constraints(self, connection, schema=None, filter_names=None, scope=None, kind=None, **kw):
+        """Override to avoid CAST AS TEXT in M-compat."""
+        compat = self.gaussdb_compatibility
+        if compat != "M":
+            return super().get_multi_check_constraints(connection, schema=schema, filter_names=filter_names, scope=scope, kind=kind, **kw)
+
+        if filter_names:
+            table_names = filter_names
+        else:
+            table_names = self.get_table_names(connection, schema=schema, scope=scope, kind=kind, **kw)
+
+        result = {}
+        for table_name in table_names:
+            cks = self._m_get_check_constraints(connection, table_name, schema)
+            result[(schema, table_name)] = cks
+        return result
+
+    @reflection.cache
+    def get_check_constraints(self, connection, table_name, schema=None, **kw):
+        compat = self.gaussdb_compatibility
+        if compat != "M":
+            return super().get_check_constraints(connection, table_name, schema, **kw)
+        return self._m_get_check_constraints(connection, table_name, schema)
+
+    def _m_get_check_constraints(self, connection, table_name, schema=None):
+        if schema is None:
+            schema = self.default_schema_name
+        sql_text = """
+            SELECT c.conname AS name,
+                   pg_catalog.pg_get_constraintdef(c.oid) AS sqltext
+            FROM pg_catalog.pg_constraint c
+            JOIN pg_catalog.pg_class cl ON cl.oid = c.conrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = cl.relnamespace
+            WHERE c.contype = 'c'
+              AND cl.relname = :table_name
+              AND n.nspname = :schema
+        """
+        rows = self._m_simple_query(connection, sql_text, {"table_name": table_name, "schema": schema or "public"})
+        result = []
+        for r in rows:
+            sqltext = r["sqltext"]
+            if isinstance(sqltext, (bytes, bytearray)):
+                sqltext = sqltext.decode() if sqltext else None
+            result.append({"name": r["name"], "sqltext": sqltext})
+        return result
+
+    def get_multi_table_comment(self, connection, schema=None, filter_names=None, scope=None, kind=None, **kw):
+        """Override to avoid CAST AS REGCLASS in M-compat."""
+        compat = self.gaussdb_compatibility
+        if compat != "M":
+            return super().get_multi_table_comment(connection, schema=schema, filter_names=filter_names, scope=scope, kind=kind, **kw)
+
+        if filter_names:
+            table_names = filter_names
+        else:
+            table_names = self.get_table_names(connection, schema=schema, scope=scope, kind=kind, **kw)
+
+        result = {}
+        for table_name in table_names:
+            tc = self.get_table_comment(connection, table_name, schema=schema, **kw)
+            result[(schema, table_name)] = tc
+        return result
+
+    def _gaussdb_get_columns(self, connection, table_name, schema=None, **kw):
+        """Custom column reflection that works across A/B/M compat modes."""
+        from sqlalchemy.dialects.postgresql.base import PGDialect
+
+        compat = self.gaussdb_compatibility
+        if schema is None:
+            schema = self.default_schema_name
+
+        # Build a simple query that avoids collation subquery and CAST AS TEXT
+        sql_text = """
+            SELECT
+                a.attname AS name,
+                pg_catalog.format_type(a.atttypid, a.atttypmod) AS format_type,
+                a.attnotnull AS not_null,
+                a.atthasdef AS has_default,
+                pg_catalog.pg_get_expr(ad.adbin, ad.adrelid) AS default_expr,
+                d.description AS comment,
+                t.typname AS type_name,
+                t.oid AS type_oid,
+                a.attidentity AS identity
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_attribute a ON c.oid = a.attrelid
+            JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+            LEFT JOIN pg_catalog.pg_attrdef ad
+                ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+            LEFT JOIN pg_catalog.pg_description d
+                ON d.objoid = a.attrelid AND d.objsubid = a.attnum
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relname = :table_name
+                AND a.attnum > 0
+                AND NOT a.attisdropped
+                AND n.nspname = :schema
+            ORDER BY a.attnum
+        """
+
+        result = connection.execute(
+            text(sql_text),
+            {"table_name": table_name, "schema": schema or "public"},
+        )
+
+        columns = []
+        for row in result.mappings():
+            col_name = row["name"]
+            format_type = row["format_type"]
+            col_type = self._resolve_type(format_type, row["type_oid"], compat)
+            # GaussDB may return boolean as int or bytes; normalize
+            raw_not_null = row["not_null"]
+            if isinstance(raw_not_null, (bytes, bytearray)):
+                raw_not_null = raw_not_null.decode() if raw_not_null else b""
+            nullable = not bool(raw_not_null)
+            raw_has_default = row["has_default"]
+            if isinstance(raw_has_default, (bytes, bytearray)):
+                raw_has_default = raw_has_default.decode() if raw_has_default else b""
+            has_default = bool(raw_has_default)
+            default_expr = row["default_expr"] if has_default else None
+            raw_identity = row["identity"]
+            if isinstance(raw_identity, (bytes, bytearray)):
+                raw_identity = raw_identity.decode() if raw_identity else ""
+
+            col_info = {
+                "name": col_name,
+                "type": col_type,
+                "nullable": nullable,
+                "default": text(default_expr) if default_expr else None,
+                "comment": row["comment"] or None,
+            }
+
+            # Autoincrement detection
+            if raw_identity and str(raw_identity) in ("a", "d"):
+                col_info["autoincrement"] = True
+
+            columns.append(col_info)
+
         return columns
+
+    def _resolve_type(self, format_type, type_oid, compat):
+        """Map a pg_catalog.format_type string to a SQLAlchemy type."""
+        ft = format_type.lower().strip()
+
+        # M-compat type mappings
+        if compat == "M":
+            if ft in ("tinyint", "tinyint unsigned"):
+                return sqltypes.SmallInteger()
+            if ft in ("blob", "longblob", "mediumblob"):
+                return sqltypes.LargeBinary()
+            if ft == "datetime":
+                return sqltypes.DateTime()
+            if ft.startswith("datetime("):
+                return sqltypes.DateTime()
+
+        # Standard PG type mappings (works for A/B/M)
+        type_map = {
+            "integer": sqltypes.Integer,
+            "bigint": sqltypes.BigInteger,
+            "smallint": sqltypes.SmallInteger,
+            "boolean": sqltypes.Boolean,
+            "text": sqltypes.Text,
+            "bytea": sqltypes.LargeBinary,
+            "date": sqltypes.Date,
+            "time without time zone": sqltypes.Time,
+            "timestamp without time zone": sqltypes.DateTime,
+            "timestamp with time zone": sqltypes.DateTime(timezone=True),
+            "double precision": sqltypes.Float,
+            "real": sqltypes.Float,
+            "json": sqltypes.JSON,
+            "jsonb": sqltypes.JSON,
+        }
+
+        # Handle character varying(N)
+        if ft.startswith("character varying") or ft.startswith("varchar"):
+            import re
+            m = re.search(r"\((\d+)\)", ft)
+            length = int(m.group(1)) if m else None
+            return sqltypes.String(length=length) if length else sqltypes.String()
+
+        # Handle numeric(p, s)
+        if ft.startswith("numeric") or ft.startswith("decimal"):
+            import re
+            m = re.search(r"\((\d+),\s*(\d+)\)", ft)
+            if m:
+                return sqltypes.Numeric(int(m.group(1)), int(m.group(2)))
+            return sqltypes.Numeric()
+
+        # Handle timestamp(N)
+        if ft.startswith("timestamp("):
+            return sqltypes.DateTime()
+
+        # Check exact match
+        for key, type_cls in type_map.items():
+            if ft == key:
+                return type_cls()
+
+        # Fallback: use String for unknown types
+        return sqltypes.String()
 
 
 # ── Registration ─────────────────────────────────────────────────────────────
