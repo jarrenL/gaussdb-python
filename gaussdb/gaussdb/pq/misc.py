@@ -52,10 +52,16 @@ class PGresAttDesc(NamedTuple):
 @cache
 def find_libpq_full_path() -> str | None:
     if sys.platform == "win32":
-        libname = ctypes.util.find_library("libpq.dll")
-        if libname is None:
-            return None
-        libname = str(Path(libname).resolve())
+        # 1) Try bundled DLL (shipped inside the package for zero-config install)
+        bundled = Path(__file__).parent.parent / "binaries" / "win_amd64" / "libpq.dll"
+        if bundled.exists():
+            libname = str(bundled)
+        else:
+            # 2) Fall back to system search
+            libname = ctypes.util.find_library("libpq.dll")
+            if libname is None:
+                return None
+            libname = str(Path(libname).resolve())
 
     elif sys.platform == "darwin":
         libname = ctypes.util.find_library("libpq.dylib")

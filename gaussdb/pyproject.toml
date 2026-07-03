@@ -102,6 +102,7 @@ include-package-data = true
 [tool.setuptools.package-data]
 gaussdb = [
     "py.typed",
+    "binaries/win_amd64/*.dll",
 ]
 
 [tool.setuptools.packages.find]

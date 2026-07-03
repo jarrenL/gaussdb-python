@@ -20,6 +20,16 @@ libname = find_libpq_full_path()
 if not libname:
     raise ImportError("libpq library not found")
 
+# On Windows, add the bundled DLL directory to the search path so that
+# libpq.dll can find its dependencies (libssl, libcrypto, libintl, etc.)
+if sys.platform == "win32":
+    import os
+    _dll_dir = os.path.dirname(libname)
+    try:
+        os.add_dll_directory(_dll_dir)
+    except (OSError, AttributeError):
+        pass
+
 pq = ctypes.cdll.LoadLibrary(libname)
 
 
