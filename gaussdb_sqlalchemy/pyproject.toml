@@ -30,16 +30,23 @@ classifiers = [
 ]
 dependencies = [
     "SQLAlchemy>=2.0,<2.2",
-    "gaussdb>=1.0.4",
 ]
 
 [project.optional-dependencies]
+psycopg3 = [
+    "gaussdb>=1.0.4",
+]
+psycopg2 = [
+    "psycopg2>=2.9.10",
+]
 alembic = [
     "alembic>=1.13",
 ]
 test = [
     "alembic>=1.13",
     "pytest>=6.2.5",
+    "gaussdb>=1.0.4",
+    "psycopg2-binary>=2.9.10",
 ]
 
 [project.urls]
@@ -49,6 +56,10 @@ Homepage = "https://github.com/jarrenL/gaussdb-python"
 gaussdb = "gaussdb_sqlalchemy.base:GaussDBDialect"
 "gaussdb.psycopg" = "gaussdb_sqlalchemy.base:GaussDBDialect"
 "gaussdb.gaussdb" = "gaussdb_sqlalchemy.base:GaussDBDialect"
+"gaussdb.psycopg2" = "gaussdb_sqlalchemy.base:GaussDBDialect_psycopg2"
 
 [tool.setuptools]
 packages = ["gaussdb_sqlalchemy"]
+
+[tool.setuptools.package-dir]
+gaussdb_sqlalchemy = "."

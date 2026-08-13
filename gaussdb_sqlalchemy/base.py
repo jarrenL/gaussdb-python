@@ -140,7 +140,11 @@ class GaussDBIdentifierPreparer(PGIdentifierPreparer):
         super().__init__(dialect, **kwargs)
         compat = getattr(dialect, "gaussdb_compatibility", None)
         if compat == "M":
-            self.identifier_quote_char = "`"
+            # M-compat mode: use backticks instead of double quotes
+            self.initial_quote = "`"
+            self.final_quote = "`"
+            self.escape_quote = "`"
+            self.escape_to_quote = "``"
             self.reserved_words.update(
                 [
                     "auto_increment", "engine", "charset", "collate",
@@ -230,34 +234,38 @@ class GaussDBDialect(PGDialect):
 
     # ── DBAPI ────────────────────────────────────────────────────────────────
 
+    # The default and ``+psycopg`` URLs use Huawei's psycopg3 fork.
+    # Driver-specific subclasses override this value instead of mutating
+    # shared class state at runtime.
+    _driver_impl: str = "gaussdb"
+
     @classmethod
     def import_dbapi(cls):
-        """Import the gaussdb (psycopg3 fork) DBAPI module.
-
-        Return the gaussdb module itself (not gaussdb.dbapi20) because
-        SQLAlchemy expects standard DBAPI attributes (paramstyle, apilevel,
-        threadsafety, connect) on the returned module.  gaussdb.dbapi20 is a
-        compatibility shim that only provides type objects and adapter
-        registration — it lacks connect() and paramstyle.
-        """
+        """Import Huawei's ``gaussdb`` DBAPI (the psycopg3 fork)."""
         try:
-            import gaussdb  # noqa: F401
-            return gaussdb
-        except ImportError:
-            try:
-                import psycopg  # noqa: F401
-                return psycopg
-            except ImportError:
-                raise ImportError(
-                    "The gaussdb dialect requires the 'gaussdb' package "
-                    "(or 'psycopg' as fallback). "
-                    "Install with: pip install gaussdb"
-                )
+            import gaussdb
+        except ImportError as exc:
+            raise ImportError(
+                "The gaussdb/psycopg3 dialect requires the 'gaussdb' package. "
+                "Install with: pip install gaussdb"
+            ) from exc
+        return gaussdb
+
+    @property
+    def _is_psycopg3(self) -> bool:
+        """True when the loaded driver is psycopg3 / gaussdb (psycopg3 fork)."""
+        return self._driver_impl == "gaussdb"
 
     # ── Connection ───────────────────────────────────────────────────────────
 
     def create_connect_args(self, url):
-        """Convert SQLAlchemy URL to gaussdb connect() kwargs."""
+        """Convert SQLAlchemy URL to driver connect() kwargs.
+
+        psycopg3 (gaussdb/psycopg):
+            connect(conninfo_string, prepare_threshold=None, cursor_factory=ClientCursor)
+        psycopg2:
+            connect(dsn_string)  — no prepare_threshold / cursor_factory
+        """
         opts = url.translate_connect_args(username="user", database="dbname")
         opts.update(url.query)
 
@@ -269,7 +277,7 @@ class GaussDBDialect(PGDialect):
         opts.pop("dbname", None)
         opts.pop("database", None)
 
-        # Build conninfo string for gaussdb.connect()
+        # Build conninfo string (works for both psycopg2 and psycopg3)
         parts = []
         if url.host:
             parts.append(f"host={url.host}")
@@ -291,17 +299,27 @@ class GaussDBDialect(PGDialect):
         if not any(k.startswith("client_encoding") for k, _ in opts.items()):
             parts.append("client_encoding=UTF8")
 
-        # Disable prepared statements entirely — psycopg3 auto-prepares
-        # after 5 executions and sends DEALLOCATE ALL on transaction
-        # boundaries, which M-compat GaussDB rejects.  prepare_threshold=None
-        # disables the feature at the protocol level so no DEALLOCATE is
-        # ever generated.  We also clear the cache on commit/rollback as a
-        # belt-and-suspenders measure (see do_rollback / do_commit).
-        # Use ClientCursor to send parameters in text format — GaussDB's
-        # binary protocol has issues with Numeric/BigInteger types.
         conninfo = " ".join(parts)
-        import gaussdb as _gaussdb_mod
-        return ([conninfo], {"prepare_threshold": None, "cursor_factory": _gaussdb_mod.ClientCursor})
+
+        if self._is_psycopg3:
+            # psycopg3 only: disable prepared statements entirely — psycopg3
+            # auto-prepares after 5 executions and sends DEALLOCATE ALL on
+            # transaction boundaries, which M-compat GaussDB rejects.
+            # prepare_threshold=None disables the feature at the protocol level
+            # so no DEALLOCATE is ever generated.  We also clear the cache on
+            # commit/rollback as a belt-and-suspenders measure (see do_rollback
+            # / do_commit).
+            # Use ClientCursor to send parameters in text format — GaussDB's
+            # binary protocol has issues with Numeric/BigInteger types.
+            dbapi = self.dbapi or self.import_dbapi()
+            return ([conninfo], {
+                "prepare_threshold": None,
+                "cursor_factory": dbapi.ClientCursor,
+            })
+        else:
+            # psycopg2: default text protocol, no auto-prepare, no
+            # DEALLOCATE ALL issue — just pass the conninfo string.
+            return ([conninfo], {})
 
     def do_execute(self, cursor, statement, parameters, context=None):
         cursor.execute(statement, parameters)
@@ -346,22 +364,34 @@ class GaussDBDialect(PGDialect):
         self.preparer = GaussDBIdentifierPreparer(self)
 
     def _gaussdb_connection(self, dbapi_conn):
-        """Return the underlying gaussdb Connection from a pool wrapper."""
-        # SQLAlchemy may wrap the connection; unwrap to get the raw DBAPI conn
+        """Return the underlying gaussdb Connection from a pool wrapper.
+
+        psycopg3 wraps connections in a ConnectionPool wrapper that exposes
+        ``dbapi_connection()``.  psycopg2 connections are already raw DBAPI
+        connections, so we return them as-is.
+        """
+        if not self._is_psycopg3:
+            return dbapi_conn
+        # psycopg3: SQLAlchemy may wrap the connection; unwrap to get raw DBAPI
         if hasattr(dbapi_conn, "dbapi_connection"):
             return dbapi_conn.dbapi_connection
         return dbapi_conn
 
     def _suppress_dealloc(self, dbapi_connection):
-        """Clear gaussdb's internal prepared-statement cache to prevent
+        """Clear psycopg3's internal prepared-statement cache to prevent
         DEALLOCATE ALL from being sent on commit/rollback.
 
-        gaussdb (psycopg3 fork) maintains a prepared-statement cache that
+        psycopg3 (gaussdb fork) maintains a prepared-statement cache that
         triggers ``DEALLOCATE ALL`` on transaction boundaries.  M-compat
         GaussDB rejects this syntax.  We clear the cache unconditionally
         because the prepared-statement optimisation is not needed and
         causes compatibility issues across all modes.
+
+        This is a no-op for psycopg2, which does not have prepared-statement
+        caching and never sends DEALLOCATE ALL.
         """
+        if not self._is_psycopg3:
+            return
         conn = self._gaussdb_connection(dbapi_connection)
         prepared = getattr(conn, "_prepared", None)
         if prepared is not None:
@@ -960,7 +990,14 @@ class GaussDBDialect(PGDialect):
 
 
 def register_dialect():
-    """Register the GaussDB dialect with SQLAlchemy."""
+    """Register the GaussDB dialect with SQLAlchemy.
+
+    Registered dialect names:
+    - ``gaussdb``         — Huawei gaussdb driver (psycopg3 fork)
+    - ``gaussdb.psycopg`` — Huawei gaussdb driver (psycopg3 fork)
+    - ``gaussdb.gaussdb`` — same as gaussdb.psycopg (alias)
+    - ``gaussdb.psycopg2``— force psycopg2 driver
+    """
     from sqlalchemy.dialects import registry
 
     registry.register(
@@ -972,3 +1009,25 @@ def register_dialect():
     registry.register(
         "gaussdb.gaussdb", "gaussdb_sqlalchemy.base", "GaussDBDialect"
     )
+    registry.register(
+        "gaussdb.psycopg2", "gaussdb_sqlalchemy.base", "GaussDBDialect_psycopg2"
+    )
+
+
+class GaussDBDialect_psycopg2(GaussDBDialect):
+    """GaussDB dialect pre-configured to use the psycopg2 driver.
+
+    Use this when the user explicitly specifies ``gaussdb+psycopg2://`` in
+    the connection URL.  It forces ``_driver_impl = "psycopg2"`` so that
+    ``import_dbapi`` skips the gaussdb/psycopg3 probe and loads psycopg2
+    directly — useful when both gaussdb (psycopg3) and psycopg2 are installed
+    but the user wants psycopg2 (e.g. on ARM where psycopg2 2.9.10 is the
+    fixed driver).
+    """
+
+    _driver_impl: str = "psycopg2"
+
+    @classmethod
+    def import_dbapi(cls):
+        import psycopg2  # noqa: F401
+        return psycopg2
