@@ -9,7 +9,7 @@ and **psycopg2** drivers.
 - GaussDB libpq (Linux: 运行 `tools/install_gaussdb_driver.sh`；507 驱动包 whl 自带)
 - 至少一个 Python 驱动：
   - `gaussdb` (psycopg3 fork) — `pip install gaussdb`
-  - `psycopg2` — 安装 GaussDB 507 驱动包提供的 `GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_x86_64.whl` 或 `GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_aarch64.whl`
+  - `psycopg2` — 安装 `gaussdb_sqlalchemy/vendor/gaussdb507_psycopg2/` 中随仓库提供的 GaussDB 507 whl
 
 ## 安装
 
@@ -18,7 +18,7 @@ pip install gaussdb-sqlalchemy
 
 # 按需安装驱动（二选一或都装）
 pip install gaussdb        # psycopg3 fork
-pip install /path/to/GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_对应CPU架构.whl
+pip install gaussdb_sqlalchemy/vendor/gaussdb507_psycopg2/GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_对应CPU架构.whl
 ```
 
 ## 自建 psycopg2 版本包
@@ -133,7 +133,7 @@ export GAUSSDB_SQLALCHEMY_PSYCOPG3_X86_URL='gaussdb://user:password@host:port/db
 export GAUSSDB_SQLALCHEMY_PSYCOPG2_X86_URL='gaussdb+psycopg2://user:password@host:port/dbname?sslmode=disable'
 
 python -m pip install gaussdb
-python -m pip install /path/to/GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_对应CPU架构.whl
+python -m pip install gaussdb_sqlalchemy/vendor/gaussdb507_psycopg2/GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_对应CPU架构.whl
 python -m pip install -e "./gaussdb_sqlalchemy[test,psycopg3]"
 python -m pytest gaussdb_sqlalchemy/tests/test_dialect_unit.py -v -rs
 python -m pytest gaussdb_sqlalchemy/tests/test_dialect_integration.py -v -rs

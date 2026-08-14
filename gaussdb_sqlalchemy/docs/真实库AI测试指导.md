@@ -108,7 +108,7 @@ python -m pip install -e "./gaussdb_sqlalchemy[psycopg3]"
 psycopg2 路线：
 
 ```bash
-python -m pip install /path/to/GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_对应CPU架构.whl
+python -m pip install gaussdb_sqlalchemy/vendor/gaussdb507_psycopg2/GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_对应CPU架构.whl
 python -m pip install -e "./gaussdb_sqlalchemy[test]"
 ```
 
@@ -203,7 +203,7 @@ $PY_BIN -m pytest gaussdb_sqlalchemy/tests/test_dialect_integration.py -v -rs
 
 ```bash
 python -m pip install gaussdb
-python -m pip install /path/to/GaussDB_Kernel_507_0_0-2.9.10-目标Python版本-none-linux_对应CPU架构.whl
+python -m pip install gaussdb_sqlalchemy/vendor/gaussdb507_psycopg2/GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_对应CPU架构.whl
 python -m pip install -e "./gaussdb_sqlalchemy[test,psycopg3]"
 ```
 
