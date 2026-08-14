@@ -21,6 +21,80 @@ pip install gaussdb        # psycopg3 fork
 pip install /path/to/GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_对应CPU架构.whl
 ```
 
+## 自建 psycopg2 版本包
+
+当前 GaussDB 507 驱动包只提供 `py311` 的 psycopg2 whl。如果需要 Python 3.8、3.9、3.10 或 3.12，需要在目标 Linux 架构上重新编译 psycopg2 的 C 扩展，不能只改 whl 文件名。
+
+构建输入：
+
+- GaussDB 507 原始 psycopg2 whl，用于提取 `gaussdb_psycopg2.lib/` 下的 `libpq.so.5.5` 及依赖库。
+- psycopg2 `2.9.10` 源码。
+- 目标 Python 版本及开发头文件，例如 Python 3.10 要安装 `python3.10-devel` 或 `python3.10-dev`。
+- GaussDB/libpq 兼容头文件，至少需要 `libpq-fe.h` 等编译头文件。
+- gcc/g++、setuptools、wheel。
+
+构建原则：
+
+```text
+Python 3.8  -> 在 Python 3.8 环境编译 _psycopg.so，输出 cp38/py38 wheel
+Python 3.9  -> 在 Python 3.9 环境编译 _psycopg.so，输出 cp39/py39 wheel
+Python 3.10 -> 在 Python 3.10 环境编译 _psycopg.so，输出 cp310/py310 wheel
+Python 3.12 -> 在 Python 3.12 环境编译 _psycopg.so，输出 cp312/py312 wheel
+```
+
+参考流程：
+
+```bash
+# 1. 在目标架构 Linux 机器上准备变量
+export PY_BIN=python3.10
+export GAUSSDB_507_WHL=/path/to/GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_x86_64.whl
+export BUILD_DIR=/tmp/gaussdb-psycopg2-build
+
+# 2. 提取 GaussDB libpq
+mkdir -p "$BUILD_DIR"
+$PY_BIN -m zipfile -e "$GAUSSDB_507_WHL" "$BUILD_DIR/whl"
+mkdir -p "$BUILD_DIR/libpq"
+cp "$BUILD_DIR"/whl/gaussdb_psycopg2.lib/* "$BUILD_DIR/libpq/"
+
+# 3. 准备 psycopg2 2.9.10 源码
+cd "$BUILD_DIR"
+$PY_BIN -m pip download psycopg2==2.9.10 --no-binary=:all: --no-deps
+tar -xf psycopg2-2.9.10*.tar.gz
+
+# 4. 准备 pg_config，让 psycopg2 编译时链接 GaussDB libpq
+mkdir -p "$BUILD_DIR/bin"
+cat > "$BUILD_DIR/bin/pg_config" <<'EOF'
+#!/bin/sh
+case "$1" in
+  --includedir|--includedir-server) echo "$GAUSSDB_LIBPQ_INCLUDE" ;;
+  --libdir) echo "$GAUSSDB_LIBPQ_LIB" ;;
+  --version) echo "GaussDB 507.0.0" ;;
+  *) echo "" ;;
+esac
+EOF
+chmod +x "$BUILD_DIR/bin/pg_config"
+
+# GAUSSDB_LIBPQ_INCLUDE 指向包含 libpq-fe.h 的目录。
+# GAUSSDB_LIBPQ_LIB 指向第 2 步提取出的 libpq 目录。
+export GAUSSDB_LIBPQ_INCLUDE=/path/to/libpq/include
+export GAUSSDB_LIBPQ_LIB="$BUILD_DIR/libpq"
+export PATH="$BUILD_DIR/bin:$PATH"
+export LD_LIBRARY_PATH="$BUILD_DIR/libpq:${LD_LIBRARY_PATH:-}"
+
+# 5. 编译 wheel
+cd "$BUILD_DIR"/psycopg2-2.9.10*
+$PY_BIN -m pip wheel . --no-deps -w "$BUILD_DIR/output"
+```
+
+构建完成后，需要确认输出 wheel 的 Python tag、平台 tag 与目标环境匹配，并确认安装后能导入：
+
+```bash
+$PY_BIN -m pip install "$BUILD_DIR"/output/*.whl
+$PY_BIN -c "import psycopg2; print(psycopg2.__version__)"
+```
+
+如果希望 wheel 像原始 507 包一样自带 `libpq`，需要把第 2 步提取出的 `.so` 文件打入 wheel 的 `gaussdb_psycopg2.lib/` 目录，并确保 `_psycopg.so` 运行时能找到这些库。否则需要在运行环境配置 `LD_LIBRARY_PATH` 指向 GaussDB libpq 目录。
+
 ## 连接
 
 ### 默认驱动（推荐）

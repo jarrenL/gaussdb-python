@@ -125,11 +125,85 @@ psycopg2 路线需要安装与当前机器匹配的 GaussDB 507 whl 包，至少
 - 操作系统：当前仅 Linux
 - CPU 架构，例如 x86_64、aarch64、arm64
 
+### 2.4 自行构建其他 Python 版本的 psycopg2 whl
+
+如果测试目标是 Python 3.8、3.9、3.10 或 3.12，当前 507 原始 whl 不能直接安装。需要由驱动构建方在对应 Python 版本和 CPU 架构的 Linux 环境中重新编译 `_psycopg.so`，再产出新的 GaussDB 507 psycopg2 whl。
+
+构建输入：
+
+- 当前 507 原始 whl，用于提取 `gaussdb_psycopg2.lib/` 下的 `libpq.so.5.5` 和相关依赖库。
+- psycopg2 `2.9.10` 源码。
+- 目标 Python 版本的解释器和开发头文件。
+- GaussDB/libpq 兼容编译头文件，至少需要 `libpq-fe.h`。
+- gcc/g++、setuptools、wheel。
+
+构建原则：
+
+```text
+不能复用 py311 的 _psycopg.so。
+不能只修改 whl 文件名。
+必须用目标 Python 版本重新编译 C 扩展。
+必须在目标 CPU 架构上构建或使用对应架构的交叉编译环境。
+```
+
+参考命令：
+
+```bash
+export PY_BIN=python3.10
+export GAUSSDB_507_WHL=/path/to/GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_x86_64.whl
+export BUILD_DIR=/tmp/gaussdb-psycopg2-build
+
+mkdir -p "$BUILD_DIR"
+$PY_BIN -m zipfile -e "$GAUSSDB_507_WHL" "$BUILD_DIR/whl"
+mkdir -p "$BUILD_DIR/libpq"
+cp "$BUILD_DIR"/whl/gaussdb_psycopg2.lib/* "$BUILD_DIR/libpq/"
+
+cd "$BUILD_DIR"
+$PY_BIN -m pip download psycopg2==2.9.10 --no-binary=:all: --no-deps
+tar -xf psycopg2-2.9.10*.tar.gz
+
+mkdir -p "$BUILD_DIR/bin"
+cat > "$BUILD_DIR/bin/pg_config" <<'EOF'
+#!/bin/sh
+case "$1" in
+  --includedir|--includedir-server) echo "$GAUSSDB_LIBPQ_INCLUDE" ;;
+  --libdir) echo "$GAUSSDB_LIBPQ_LIB" ;;
+  --version) echo "GaussDB 507.0.0" ;;
+  *) echo "" ;;
+esac
+EOF
+chmod +x "$BUILD_DIR/bin/pg_config"
+
+export GAUSSDB_LIBPQ_INCLUDE=/path/to/libpq/include
+export GAUSSDB_LIBPQ_LIB="$BUILD_DIR/libpq"
+export PATH="$BUILD_DIR/bin:$PATH"
+export LD_LIBRARY_PATH="$BUILD_DIR/libpq:${LD_LIBRARY_PATH:-}"
+
+cd "$BUILD_DIR"/psycopg2-2.9.10*
+$PY_BIN -m pip wheel . --no-deps -w "$BUILD_DIR/output"
+```
+
+构建后检查：
+
+```bash
+$PY_BIN -m pip install "$BUILD_DIR"/output/*.whl
+$PY_BIN -c "import psycopg2; print(psycopg2.__version__)"
+$PY_BIN -m pytest gaussdb_sqlalchemy/tests/test_dialect_integration.py -v -rs
+```
+
+验收要求：
+
+- wheel 文件名或 tag 能体现目标 Python 版本和 CPU 架构。
+- `_psycopg.so` 是目标 Python 版本重新编译的结果。
+- 安装后 `import psycopg2` 成功。
+- `_psycopg.so` 运行时能找到 GaussDB `libpq`；可以将 `.so` 打包进 wheel 的 `gaussdb_psycopg2.lib/`，或在运行环境配置 `LD_LIBRARY_PATH`。
+- 使用 `gaussdb+psycopg2://` 连接串执行真实库测试通过。
+
 如果要一次验证两条路线：
 
 ```bash
 python -m pip install gaussdb
-python -m pip install /path/to/psycopg2-对应Python版本-对应CPU架构.whl
+python -m pip install /path/to/GaussDB_Kernel_507_0_0-2.9.10-目标Python版本-none-linux_对应CPU架构.whl
 python -m pip install -e "./gaussdb_sqlalchemy[test,psycopg3]"
 ```
 
