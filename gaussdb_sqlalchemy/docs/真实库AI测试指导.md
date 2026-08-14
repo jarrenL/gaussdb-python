@@ -51,23 +51,24 @@ git switch feature/sqlalchemy-dialect-psycopg2-psycopg3
 
 ### 2.2 Python 环境
 
-建议使用 Python 3.9 到 3.12。
+建议优先使用 Python 3.11。当前本季 psycopg2 路线以 GaussDB 507 驱动包内置 whl 为准，不以 PyPI 公共 `psycopg2` / `psycopg2-binary` 为准。
 
 Python 版本支持验证结论：
 
 | Python 版本 | SQLAlchemy 方言包 | psycopg3 / gaussdb 路线 | psycopg2 路线 |
 |-------------|-------------------|--------------------------|---------------|
-| 3.8 | 可安装 | PyPI `gaussdb>=1.0.4` 不声明支持；如需验证需使用内网提供的 3.8 兼容 gaussdb 包或源码包 | 可验证，但需锁定 `psycopg2-binary==2.9.10` 或提供对应 psycopg2 whl |
-| 3.9 | 可安装 | 支持 | 支持 |
-| 3.10 | 可安装 | 支持 | 支持 |
-| 3.11 | 已本地验证单元测试通过 | 支持 | 支持 |
-| 3.12 | 已本地验证单元测试通过 | 支持 | 支持 |
+| 3.8 | 可安装 | PyPI `gaussdb>=1.0.4` 不声明支持；如需验证需使用内网提供的 3.8 兼容 gaussdb 包或源码包 | 当前 507 原始 whl 不支持 |
+| 3.9 | 可安装 | 支持 | 当前 507 原始 whl 不支持 |
+| 3.10 | 可安装 | 支持 | 当前 507 原始 whl 不支持 |
+| 3.11 | 已本地验证单元测试通过 | 支持 | 当前 507 原始 whl 支持，需按 CPU 架构选择 x86_64 或 aarch64 whl |
+| 3.12 | 已本地验证单元测试通过 | 支持 | 当前 507 原始 whl 不支持 |
 
 说明：
 
-- 当前 PyPI `psycopg2 2.9.12` 声明支持 Python 3.9 到 3.14，不覆盖 Python 3.8。
-- Python 3.8 如走 psycopg2，建议使用 `psycopg2-binary==2.9.10` 或客户提供的同版本 whl；`psycopg2-binary 2.9.10` 有 cp38 wheel。
-- Python 3.9 到 3.12 可使用较新的 `psycopg2` / `psycopg2-binary` 版本。
+- 本季 psycopg2 交付物来自 GaussDB 507 驱动包，包名为 `GaussDB_Kernel_507_0_0`，版本 `2.9.10`，导出的 Python 顶层包为 `psycopg2`。
+- 当前已检查到的 507 原始 whl 只有两个标签：`py311-none-linux_x86_64` 和 `py311-none-linux_aarch64`。
+- 这两个 507 whl 的 metadata 虽然写了 `Requires-Python: >=3.8`，但 wheel tag 是 `py311`，测试验收应以实际 whl tag 为准，即只声明 Python 3.11。
+- 如需验证 Python 3.8、3.9、3.10 或 3.12 的 psycopg2 路线，需要先由驱动侧提供对应 Python 版本和 CPU 架构的 GaussDB 507 psycopg2 whl。
 - psycopg3 路线依赖 `gaussdb` 包。公开 PyPI `gaussdb 1.0.4` 声明 Python >=3.9；如果必须验证 Python 3.8，需要内网提供兼容 Python 3.8 的 `gaussdb` 包或从当前源码构建。
 
 ```bash
@@ -107,21 +108,21 @@ python -m pip install -e "./gaussdb_sqlalchemy[psycopg3]"
 psycopg2 路线：
 
 ```bash
-python -m pip install /path/to/psycopg2-对应Python版本-对应CPU架构.whl
+python -m pip install /path/to/GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_对应CPU架构.whl
 python -m pip install -e "./gaussdb_sqlalchemy[test]"
 ```
 
-Python 3.8 专项：
+当前已检查到的 507 原始 whl：
 
-```bash
-python -m pip install /path/to/psycopg2_binary-2.9.10-cp38-cp38-对应平台.whl
-python -m pip install -e "./gaussdb_sqlalchemy[test]"
+```text
+GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_x86_64.whl
+GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_aarch64.whl
 ```
 
-psycopg2 路线需要安装与当前机器匹配的 whl 包，至少要匹配：
+psycopg2 路线需要安装与当前机器匹配的 GaussDB 507 whl 包，至少要匹配：
 
-- Python 版本，例如 cp39、cp310、cp311、cp312
-- 操作系统，例如 manylinux、win_amd64
+- Python 版本：当前仅 `py311`
+- 操作系统：当前仅 Linux
 - CPU 架构，例如 x86_64、aarch64、arm64
 
 如果要一次验证两条路线：
