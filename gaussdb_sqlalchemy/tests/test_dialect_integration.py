@@ -5,14 +5,16 @@ These tests require a real GaussDB database and are skipped by default.
 Configure one or more URLs with environment variables before running.
 
 Examples:
-    export GAUSSDB_SQLALCHEMY_PSYCOPG3_URL='gaussdb://user:pass@host:port/db?sslmode=disable'
-    export GAUSSDB_SQLALCHEMY_PSYCOPG2_URL='gaussdb+psycopg2://user:pass@host:port/db?sslmode=disable'
+    export GAUSSDB_SQLALCHEMY_PSYCOPG3_X86_URL='gaussdb://user:pass@host:port/db?sslmode=disable'
+    export GAUSSDB_SQLALCHEMY_PSYCOPG2_X86_URL='gaussdb+psycopg2://user:pass@host:port/db?sslmode=disable'
     python -m pytest gaussdb_sqlalchemy/tests/test_dialect_integration.py -v -rs
 """
 
 from __future__ import annotations
 
 import os
+import platform
+import sys
 import uuid
 from decimal import Decimal
 
@@ -33,7 +35,14 @@ from sqlalchemy import (
 from sqlalchemy.orm import Session, declarative_base
 
 
-URL_ENV_KEYS = (
+MATRIX_URL_ENV_KEYS = (
+    "GAUSSDB_SQLALCHEMY_PSYCOPG3_X86_URL",
+    "GAUSSDB_SQLALCHEMY_PSYCOPG3_ARM_URL",
+    "GAUSSDB_SQLALCHEMY_PSYCOPG2_X86_URL",
+    "GAUSSDB_SQLALCHEMY_PSYCOPG2_ARM_URL",
+)
+
+LEGACY_URL_ENV_KEYS = (
     "GAUSSDB_SQLALCHEMY_TEST_URL",
     "GAUSSDB_SQLALCHEMY_PSYCOPG3_URL",
     "GAUSSDB_SQLALCHEMY_PSYCOPG2_URL",
@@ -47,7 +56,7 @@ def _configured_urls() -> list[tuple[str, str]]:
     cases: list[tuple[str, str]] = []
     seen: set[str] = set()
 
-    for key in URL_ENV_KEYS:
+    for key in MATRIX_URL_ENV_KEYS + LEGACY_URL_ENV_KEYS:
         value = os.environ.get(key, "").strip()
         if value and value not in seen:
             seen.add(value)
@@ -77,12 +86,33 @@ def _split_urls(value: str) -> list[str]:
 URL_CASES = _configured_urls() or [("not-configured", "")]
 
 
+def _driver_from_url(url: str) -> str:
+    return "psycopg2" if url.startswith("gaussdb+psycopg2://") else "psycopg3"
+
+
+def _current_arch() -> str:
+    machine = platform.machine().lower()
+    if machine in {"x86_64", "amd64"}:
+        return "x86_64"
+    if machine in {"arm64", "aarch64"}:
+        return "arm64"
+    return machine or "unknown"
+
+
+def _expected_arch_from_label(label: str) -> str | None:
+    if label.endswith("_X86_URL"):
+        return "x86_64"
+    if label.endswith("_ARM_URL"):
+        return "arm64"
+    return None
+
+
 def _case_id(case: tuple[str, str]) -> str:
     label, url = case
     if not url:
         return label
-    driver = "psycopg2" if url.startswith("gaussdb+psycopg2://") else "psycopg3"
-    return f"{label}:{driver}"
+    arch = _expected_arch_from_label(label) or _current_arch()
+    return f"{label}:{_driver_from_url(url)}:{arch}"
 
 
 def _require_driver(url: str) -> None:
@@ -94,13 +124,19 @@ def _require_driver(url: str) -> None:
 
 @pytest.fixture(params=URL_CASES, ids=_case_id)
 def engine(request):
-    _, url = request.param
+    label, url = request.param
     if not url:
         pytest.skip(
-            "Set GAUSSDB_SQLALCHEMY_TEST_URL, GAUSSDB_SQLALCHEMY_PSYCOPG3_URL, "
-            "GAUSSDB_SQLALCHEMY_PSYCOPG2_URL, or GAUSSDB_SQLALCHEMY_TEST_URLS "
-            "to run live GaussDB SQLAlchemy tests."
+            "Set GAUSSDB_SQLALCHEMY_PSYCOPG3_X86_URL, "
+            "GAUSSDB_SQLALCHEMY_PSYCOPG3_ARM_URL, "
+            "GAUSSDB_SQLALCHEMY_PSYCOPG2_X86_URL, "
+            "GAUSSDB_SQLALCHEMY_PSYCOPG2_ARM_URL, or a legacy "
+            "GAUSSDB_SQLALCHEMY_*URL variable to run live tests."
         )
+
+    expected_arch = _expected_arch_from_label(label)
+    if expected_arch and expected_arch != _current_arch():
+        pytest.skip(f"{label} is for {expected_arch}, current machine is {_current_arch()}.")
 
     _require_driver(url)
 
@@ -108,6 +144,9 @@ def engine(request):
 
     register_dialect()
     eng = create_engine(url, future=True, pool_pre_ping=True)
+    eng._gaussdb_test_label = label
+    eng._gaussdb_test_driver = _driver_from_url(url)
+    eng._gaussdb_test_arch = _current_arch()
     try:
         with eng.connect() as conn:
             assert conn.execute(text("select 1")).scalar_one() == 1
@@ -123,6 +162,25 @@ def _table_name(prefix: str) -> str:
 def _drop_table(engine, table_name: str) -> None:
     with engine.begin() as conn:
         conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+
+
+@pytest.mark.integration
+def test_runtime_driver_and_architecture(engine):
+    driver = engine._gaussdb_test_driver
+    arch = engine._gaussdb_test_arch
+
+    assert driver in {"psycopg2", "psycopg3"}
+    assert arch in {"x86_64", "arm64"}
+    assert sys.version_info >= (3, 7)
+
+    if driver == "psycopg2":
+        import psycopg2
+
+        assert getattr(psycopg2, "__version__", "")
+    else:
+        import gaussdb
+
+        assert getattr(gaussdb, "__version__", "")
 
 
 @pytest.mark.integration

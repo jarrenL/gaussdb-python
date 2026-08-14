@@ -11,11 +11,21 @@
 - SQLAlchemy 方言注册：`gaussdb://`、`gaussdb+psycopg://`、`gaussdb+psycopg2://`
 - psycopg3 路线：底层使用 `gaussdb` Python 包
 - psycopg2 路线：底层使用 `psycopg2`
+- CPU 架构区分：`x86_64` 和 `arm64/aarch64`
 - 真实库 `select 1`
 - 数据库兼容模式识别：A/B/M/P
 - SQLAlchemy Core 建表、插入、查询、反射、删表
 - 事务回滚
 - SQLAlchemy ORM 增删改查
+
+测试矩阵：
+
+| 场景 | CPU 架构 | 底层驱动 | SQLAlchemy URL 前缀 | 安装要求 |
+|------|----------|----------|---------------------|----------|
+| 1 | x86_64 | psycopg3 | `gaussdb://` 或 `gaussdb+psycopg://` | `pip install gaussdb` |
+| 2 | arm64/aarch64 | psycopg3 | `gaussdb://` 或 `gaussdb+psycopg://` | `pip install gaussdb` |
+| 3 | x86_64 | psycopg2 | `gaussdb+psycopg2://` | 安装 x86_64 对应的 psycopg2 whl 包 |
+| 4 | arm64/aarch64 | psycopg2 | `gaussdb+psycopg2://` | 安装 arm64/aarch64 对应的 psycopg2 whl 包 |
 
 ## 2. 前置条件
 
@@ -71,21 +81,31 @@ python -m pip install -e "./gaussdb_sqlalchemy[test]"
 psycopg3 路线：
 
 ```bash
-python -m pip install -e "./gaussdb"
+python -m pip install gaussdb
 python -m pip install -e "./gaussdb_sqlalchemy[psycopg3]"
 ```
+
+如果内网没有 PyPI 访问权限，可改为安装内网制品库中的 `gaussdb` 包，或在源码仓库根目录执行 `python -m pip install -e "./gaussdb"`。
 
 psycopg2 路线：
 
 ```bash
-python -m pip install -e "./gaussdb_sqlalchemy[psycopg2]"
+python -m pip install /path/to/psycopg2-对应Python版本-对应CPU架构.whl
+python -m pip install -e "./gaussdb_sqlalchemy[test]"
 ```
+
+psycopg2 路线需要安装与当前机器匹配的 whl 包，至少要匹配：
+
+- Python 版本，例如 cp39、cp310、cp311、cp312
+- 操作系统，例如 manylinux、win_amd64
+- CPU 架构，例如 x86_64、aarch64、arm64
 
 如果要一次验证两条路线：
 
 ```bash
-python -m pip install -e "./gaussdb"
-python -m pip install -e "./gaussdb_sqlalchemy[test,psycopg3,psycopg2]"
+python -m pip install gaussdb
+python -m pip install /path/to/psycopg2-对应Python版本-对应CPU架构.whl
+python -m pip install -e "./gaussdb_sqlalchemy[test,psycopg3]"
 ```
 
 ### 2.4 原生客户端库
@@ -102,6 +122,7 @@ psycopg3 和 psycopg2 都属于 libpq 协议路线。测试机器必须能加载
 检查命令：
 
 ```bash
+python -c "import platform; print(platform.machine())"
 python -c "import gaussdb; print('gaussdb ok')"
 python -c "import psycopg2; print('psycopg2 ok')"
 ```
@@ -137,11 +158,37 @@ export GAUSSDB_SQLALCHEMY_PSYCOPG3_URL='gaussdb://用户名:URL编码后的密�
 export GAUSSDB_SQLALCHEMY_PSYCOPG3_URL='gaussdb+psycopg://用户名:URL编码后的密码@数据库IP:端口/数据库名?sslmode=disable'
 ```
 
+建议按架构显式配置。x86_64 机器：
+
+```bash
+export GAUSSDB_SQLALCHEMY_PSYCOPG3_X86_URL='gaussdb://用户名:URL编码后的密码@数据库IP:端口/数据库名?sslmode=disable'
+```
+
+arm64/aarch64 机器：
+
+```bash
+export GAUSSDB_SQLALCHEMY_PSYCOPG3_ARM_URL='gaussdb://用户名:URL编码后的密码@数据库IP:端口/数据库名?sslmode=disable'
+```
+
 ### 3.2 psycopg2 入口
 
 ```bash
 export GAUSSDB_SQLALCHEMY_PSYCOPG2_URL='gaussdb+psycopg2://用户名:URL编码后的密码@数据库IP:端口/数据库名?sslmode=disable'
 ```
+
+建议按架构显式配置。x86_64 机器：
+
+```bash
+export GAUSSDB_SQLALCHEMY_PSYCOPG2_X86_URL='gaussdb+psycopg2://用户名:URL编码后的密码@数据库IP:端口/数据库名?sslmode=disable'
+```
+
+arm64/aarch64 机器：
+
+```bash
+export GAUSSDB_SQLALCHEMY_PSYCOPG2_ARM_URL='gaussdb+psycopg2://用户名:URL编码后的密码@数据库IP:端口/数据库名?sslmode=disable'
+```
+
+测试用例会读取当前机器架构。如果在 arm64 机器上误配置了 `_X86_URL`，或在 x86_64 机器上误配置了 `_ARM_URL`，对应用例会自动 skipped，并在 `pytest -rs` 输出中说明原因。
 
 ### 3.3 单连接串入口
 
@@ -225,12 +272,18 @@ python -m pytest gaussdb_sqlalchemy/tests -v -rs
 
 真实库测试通过时，至少应看到以下场景通过：
 
+- `test_runtime_driver_and_architecture`
 - `test_live_select_and_compatibility_detection`
 - `test_core_create_insert_query_reflect_drop`
 - `test_transaction_rollback`
 - `test_orm_crud`
 
-如果同时配置 psycopg3 和 psycopg2 两个 URL，每个场景会分别执行一遍。
+如果同时配置 psycopg3 和 psycopg2 两个 URL，每个场景会分别执行一遍。pytest `-v` 输出中的用例参数会带上环境变量名、驱动类型和架构，例如：
+
+```text
+GAUSSDB_SQLALCHEMY_PSYCOPG3_X86_URL:psycopg3:x86_64
+GAUSSDB_SQLALCHEMY_PSYCOPG2_ARM_URL:psycopg2:arm64
+```
 
 通过示例：
 
@@ -300,9 +353,13 @@ python -m pip install -e "./gaussdb_sqlalchemy[psycopg2]"
 1. 确认分支为 feature/sqlalchemy-dialect-psycopg2-psycopg3。
 2. 创建 Python 虚拟环境。
 3. 安装 ./gaussdb_sqlalchemy[test,psycopg3,psycopg2]。
-4. 根据实际数据库信息设置以下环境变量中的一个或多个：
-   - GAUSSDB_SQLALCHEMY_PSYCOPG3_URL
-   - GAUSSDB_SQLALCHEMY_PSYCOPG2_URL
+   - psycopg3 使用 pip install gaussdb
+   - psycopg2 使用当前 Python 版本和 CPU 架构匹配的 whl 包
+4. 根据实际数据库信息和机器架构设置以下环境变量中的一个或多个：
+   - GAUSSDB_SQLALCHEMY_PSYCOPG3_X86_URL
+   - GAUSSDB_SQLALCHEMY_PSYCOPG3_ARM_URL
+   - GAUSSDB_SQLALCHEMY_PSYCOPG2_X86_URL
+   - GAUSSDB_SQLALCHEMY_PSYCOPG2_ARM_URL
    - GAUSSDB_SQLALCHEMY_TEST_URL_A
    - GAUSSDB_SQLALCHEMY_TEST_URL_B
    - GAUSSDB_SQLALCHEMY_TEST_URL_M
@@ -322,6 +379,7 @@ python -m pip install -e "./gaussdb_sqlalchemy[psycopg2]"
 提交号：
 操作系统：
 Python 版本：
+CPU 架构：
 SQLAlchemy 版本：
 gaussdb 驱动版本：
 psycopg2 驱动版本：
@@ -334,11 +392,14 @@ GaussDB 服务端版本：
 结果：
 
 2. psycopg3 真实库测试结果：
+CPU 架构：x86_64 / arm64
 连接串协议头：gaussdb:// 或 gaussdb+psycopg://
 结果：
 失败详情：
 
 3. psycopg2 真实库测试结果：
+CPU 架构：x86_64 / arm64
+psycopg2 whl 包名：
 连接串协议头：gaussdb+psycopg2://
 结果：
 失败详情：
