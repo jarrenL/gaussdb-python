@@ -11,6 +11,9 @@ addopts = "-ra"
 filterwarnings = [
     "error",
 ]
+markers = [
+    "integration: tests that require a live GaussDB database",
+]
 testpaths=[
     "tests",
 ]

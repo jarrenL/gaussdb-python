@@ -50,6 +50,26 @@ engine = create_engine(
 )
 ```
 
+## 真实库测试
+
+本分支提供 SQLAlchemy 方言真实库测试：
+
+```bash
+export GAUSSDB_SQLALCHEMY_PSYCOPG3_URL='gaussdb://user:password@host:port/dbname?sslmode=disable'
+export GAUSSDB_SQLALCHEMY_PSYCOPG2_URL='gaussdb+psycopg2://user:password@host:port/dbname?sslmode=disable'
+
+python -m pip install -e "./gaussdb"
+python -m pip install -e "./gaussdb_sqlalchemy[test,psycopg3,psycopg2]"
+python -m pytest gaussdb_sqlalchemy/tests/test_dialect_unit.py -v -rs
+python -m pytest gaussdb_sqlalchemy/tests/test_dialect_integration.py -v -rs
+```
+
+未配置真实库 URL 时，集成测试会自动跳过。完整测试说明见：
+
+```text
+gaussdb_sqlalchemy/docs/真实库AI测试指导.md
+```
+
 ## 驱动选择说明
 
 | 特性 | psycopg3 (gaussdb) | psycopg2 |
