@@ -2,6 +2,9 @@
 
 本目录存放 GaussDB 507 驱动包中提取出的 psycopg2 Python 驱动 whl，供内网测试 SQLAlchemy `gaussdb+psycopg2://` 路线使用。
 
+当前 GaussDB 507 官方 psycopg2 驱动包仅支持 Python 3.11。本目录中的 wheel
+不支持 Python 3.8、3.9、3.10、3.12 或其他 Python 版本。
+
 当前包含：
 
 ```text

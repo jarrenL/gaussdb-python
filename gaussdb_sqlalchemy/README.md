@@ -5,7 +5,9 @@ and **psycopg2** drivers.
 
 ## 前置条件
 
-- Python 3.9+；psycopg2 路线当前推荐 Python 3.11
+- SQLAlchemy 方言支持 Python 3.9+
+- **当前 GaussDB 507 官方 psycopg2 驱动包仅支持 Python 3.11**；其他
+  Python 版本不在当前 psycopg2 路线的交付支持范围内
 - GaussDB libpq (Linux: 运行 `tools/install_gaussdb_driver.sh`；507 驱动包 whl 自带)
 - 至少一个 Python 驱动：
   - `gaussdb` (psycopg3 fork) — `pip install gaussdb`
@@ -71,7 +73,8 @@ gaussdb_sqlalchemy/dist/gaussdb_sqlalchemy-0.1.0-py3-none-any.whl
 
 ### 方案一：方言 + GaussDB 507 psycopg2
 
-仅适用于 Linux、Python 3.11，并且必须选择与机器 CPU 架构一致的 wheel：
+当前随项目提供的 GaussDB 507 官方 psycopg2 驱动包仅支持 Linux、Python
+3.11，并且必须选择与机器 CPU 架构一致的 wheel：
 
 ```bash
 # Linux x86_64
@@ -141,7 +144,11 @@ PY
 
 ## 自建 psycopg2 版本包
 
-当前 GaussDB 507 驱动包只提供 `py311` 的 psycopg2 whl。如果需要 Python 3.8、3.9、3.10 或 3.12，需要在目标 Linux 架构上重新编译 psycopg2 的 C 扩展，不能只改 whl 文件名。
+当前 GaussDB 507 官方驱动包只提供 `py311` 的 psycopg2 wheel，因此本项目
+当前仅将 Python 3.11 列为 psycopg2 路线的交付支持版本。下面的自建流程仅供
+研究和验证，不属于当前正式交付支持范围。如果客户自行适配 Python 3.8、3.9、
+3.10 或 3.12，必须在目标 Linux 架构上重新编译并完整验证 psycopg2 的 C 扩展，
+不能只修改 wheel 文件名。
 
 构建输入：
 
