@@ -2,6 +2,25 @@
 
 本目录存放 GaussDB 507 驱动包中提取出的 psycopg2 Python 驱动 whl，供内网测试 SQLAlchemy `gaussdb+psycopg2://` 路线使用。
 
+## 来源
+
+这些 wheel 来自 GaussDB 507 官方产品驱动总包，不来自 PyPI
+`psycopg2-binary`，也不来自 psycopg3 生态仓库
+`huaweicloud-samples/database-gaussdb-python`。
+
+提取路径：
+
+```text
+DBS-GaussDB-driver_<CPU>_V2.0-10.0.0_*.tar.gz
+└── DBS-GaussDB-driver_507.0_*.tar.gz
+    └── <Centralized|Distributed|CloudNative>/python_driver.tar.gz
+        └── <目标Linux系统>/GaussDB-Kernel_507.0.0.B071_Python_*_Py3.11_*.tar.gz
+            └── GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_<CPU>.whl
+```
+
+华为云 GaussDB Psycopg 驱动获取与安装说明：
+<https://support.huaweicloud.com/centralized-devg-v8-gaussdb/gaussdb-42-0176.html>
+
 当前 GaussDB 507 官方 psycopg2 驱动包仅支持 Python 3.11。本目录中的 wheel
 不支持 Python 3.8、3.9、3.10、3.12 或其他 Python 版本。
 

@@ -13,6 +13,47 @@ and **psycopg2** drivers.
   - `gaussdb` (psycopg3 fork) — `pip install gaussdb`
   - `psycopg2` — 安装 `gaussdb_sqlalchemy/vendor/gaussdb507_psycopg2/` 中随仓库提供的 GaussDB 507 whl
 
+## 底层驱动来源
+
+两条驱动路线来自不同的华为交付渠道，不要混淆：
+
+| 路线 | Python 导入名 | 驱动来源 | 当前使用版本 |
+|------|---------------|----------|--------------|
+| psycopg3 | `gaussdb` | 华为云生态仓库 [`huaweicloud-samples/database-gaussdb-python`](https://github.com/huaweicloud-samples/database-gaussdb-python)，该项目 fork 自 [`psycopg/psycopg`](https://github.com/psycopg/psycopg) | `gaussdb>=1.0.4` |
+| psycopg2 | `psycopg2` | GaussDB 507 官方产品驱动总包中的 `python_driver.tar.gz`，不是上述 psycopg3 生态仓库 | `GaussDB_Kernel_507_0_0 2.9.10` |
+
+### psycopg3 / gaussdb 来源
+
+- 当前生态仓库：<https://github.com/huaweicloud-samples/database-gaussdb-python>
+- PyPI 发布包：<https://pypi.org/project/gaussdb/>
+- 上游基础项目：<https://github.com/psycopg/psycopg>（psycopg3）
+- 安装后使用 `import gaussdb`，不是 `import psycopg`。
+- 该 wheel 是纯 Python 包，运行时仍需准备与 GaussDB 匹配的 `libpq`。
+
+### psycopg2 / GaussDB 507 来源
+
+psycopg2 wheel 从 GaussDB 507 官方驱动总包逐层提取，典型路径为：
+
+```text
+DBS-GaussDB-driver_<CPU>_V2.0-10.0.0_*.tar.gz
+└── DBS-GaussDB-driver_507.0_*.tar.gz
+    └── Centralized | Distributed | CloudNative
+        └── python_driver.tar.gz
+            └── <目标Linux系统>/GaussDB-Kernel_507.0.0.B071_Python_*_Py3.11_*.tar.gz
+                └── GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_<CPU>.whl
+```
+
+本仓库用于测试的原始 wheel 已保持原文件名放在：
+
+```text
+gaussdb_sqlalchemy/vendor/gaussdb507_psycopg2/
+```
+
+该包安装后使用 `import psycopg2`，并自带 GaussDB `libpq.so.5.5` 及相关
+Linux 动态库。它不是 PyPI 公共 `psycopg2-binary`，也不是从
+`database-gaussdb-python` 仓库构建出来的。当前 507 官方成品仅覆盖 Python
+3.11 的 Linux x86_64 和 Linux aarch64。
+
 ## 交付物与依赖关系
 
 SQLAlchemy 方言和数据库驱动是两个独立安装包，必须组合使用。方言包不包含
