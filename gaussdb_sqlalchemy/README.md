@@ -11,15 +11,133 @@ and **psycopg2** drivers.
   - `gaussdb` (psycopg3 fork) — `pip install gaussdb`
   - `psycopg2` — 安装 `gaussdb_sqlalchemy/vendor/gaussdb507_psycopg2/` 中随仓库提供的 GaussDB 507 whl
 
-## 安装
+## 交付物与依赖关系
+
+SQLAlchemy 方言和数据库驱动是两个独立安装包，必须组合使用。方言包不包含
+`psycopg2`、`gaussdb` 或 `libpq`：
+
+```text
+Python 应用 / SQLAlchemy
+        ↓
+gaussdb_sqlalchemy-0.1.0-py3-none-any.whl       本项目交付的方言包
+        ↓
+二选一：
+  gaussdb（华为 psycopg3 fork）                 psycopg3 路线
+  GaussDB 507 psycopg2 平台 wheel               psycopg2 路线
+        ↓
+GaussDB libpq → GaussDB
+```
+
+推荐的离线交付目录：
+
+```text
+GaussDB-SQLAlchemy-Driver/
+├── dialect/
+│   └── gaussdb_sqlalchemy-0.1.0-py3-none-any.whl
+├── drivers/
+│   ├── psycopg2/
+│   │   ├── GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_x86_64.whl
+│   │   └── GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_aarch64.whl
+│   └── psycopg3/
+│       └── gaussdb-1.0.4-py3-none-any.whl
+├── examples/
+├── README.md
+└── THIRD_PARTY_NOTICES.md
+```
+
+华为原版驱动应保持独立文件、原始文件名和校验值，不要合并进方言 wheel。
+
+## 构建方言 wheel
+
+在仓库根目录执行：
 
 ```bash
-pip install gaussdb-sqlalchemy
-
-# 按需安装驱动（二选一或都装）
-pip install gaussdb        # psycopg3 fork
-pip install gaussdb_sqlalchemy/vendor/gaussdb507_psycopg2/GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_对应CPU架构.whl
+python -m pip install build
+python -m build --wheel gaussdb_sqlalchemy
 ```
+
+输出文件为：
+
+```text
+gaussdb_sqlalchemy/dist/gaussdb_sqlalchemy-0.1.0-py3-none-any.whl
+```
+
+`py3-none-any` 表示方言层本身不含平台二进制文件；底层 psycopg2/psycopg3
+驱动仍需满足目标 Python、操作系统和 CPU 架构要求。
+
+## 组合安装
+
+以下两条路线任选其一。使用离线包时，先安装底层驱动，再安装方言 wheel。
+
+### 方案一：方言 + GaussDB 507 psycopg2
+
+仅适用于 Linux、Python 3.11，并且必须选择与机器 CPU 架构一致的 wheel：
+
+```bash
+# Linux x86_64
+python3.11 -m pip install \
+  drivers/psycopg2/GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_x86_64.whl
+
+# Linux aarch64（与上面的 x86_64 命令二选一）
+python3.11 -m pip install \
+  drivers/psycopg2/GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_aarch64.whl
+
+# 安装方言层
+python3.11 -m pip install \
+  dialect/gaussdb_sqlalchemy-0.1.0-py3-none-any.whl
+```
+
+仓库内测试安装也可以直接使用：
+
+```bash
+python3.11 -m pip install \
+  gaussdb_sqlalchemy/vendor/gaussdb507_psycopg2/GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_对应CPU架构.whl
+python3.11 -m pip install ./gaussdb_sqlalchemy
+```
+
+连接 URL 使用 `gaussdb+psycopg2://`。
+
+### 方案二：方言 + gaussdb（psycopg3）
+
+联网安装：
+
+```bash
+python -m pip install "gaussdb>=1.0.4"
+python -m pip install dialect/gaussdb_sqlalchemy-0.1.0-py3-none-any.whl
+```
+
+完全离线安装：
+
+```bash
+python -m pip install drivers/psycopg3/gaussdb-1.0.4-py3-none-any.whl
+python -m pip install dialect/gaussdb_sqlalchemy-0.1.0-py3-none-any.whl
+```
+
+psycopg3 的 `gaussdb` wheel 是纯 Python 包，运行环境还必须能够加载与 GaussDB
+匹配的 `libpq`。必要时配置 `LD_LIBRARY_PATH`。连接 URL 使用
+`gaussdb://` 或 `gaussdb+psycopg://`。
+
+### 安装验证
+
+```bash
+# 查看已安装的方言和底层驱动
+python -m pip show gaussdb-sqlalchemy
+python -c "from sqlalchemy.dialects import registry; print(registry.load('gaussdb.psycopg2'))"
+# psycopg3 路线将上一行的 gaussdb.psycopg2 改成 gaussdb.psycopg
+
+# 不连接数据库，确认 engine 能按指定驱动构造
+python - <<'PY'
+from sqlalchemy import create_engine
+
+engine = create_engine(
+    "gaussdb+psycopg2://user:password@127.0.0.1:5432/postgres"
+)
+print(engine.dialect.name, engine.dialect.driver)
+PY
+```
+
+两种驱动可以同时安装，但连接 URL 应显式写明 `+psycopg2` 或 `+psycopg`，
+避免部署环境变化后难以判断实际使用的底层驱动。
 
 ## 自建 psycopg2 版本包
 
