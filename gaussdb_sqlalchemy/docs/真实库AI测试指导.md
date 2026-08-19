@@ -12,11 +12,22 @@
 - psycopg3 路线：底层使用 `gaussdb` Python 包
 - psycopg2 路线：底层使用 `psycopg2`
 - CPU 架构区分：`x86_64` 和 `arm64/aarch64`
-- 真实库 `select 1`
+- 真实库连接、`select 1`、驱动与 CPU 架构识别
 - 数据库兼容模式识别：A/B/M/P
+- 命名参数绑定和标量结果
 - SQLAlchemy Core 建表、插入、查询、反射、删表
-- 事务回滚
-- SQLAlchemy ORM 增删改查
+- Unicode、空字符串、NULL 和长文本往返
+- Numeric、Boolean、Date、DateTime 和二进制类型往返
+- executemany 批量插入、UPDATE 和 DELETE
+- 事务提交、事务回滚和保存点回滚
+- 复合主键、字段、索引和唯一约束反射
+- 唯一约束冲突与连接错误恢复
+- 连接池重复签入/签出
+- SQLAlchemy ORM 增删改查、过滤、排序、聚合和 limit
+
+当前共有 **18 类真实库基础测试**。每配置一个有效的真实库 URL，就执行
+18 条；完整的 psycopg2/psycopg3 × x86_64/ARM64 四组合矩阵最多执行
+**72 次**。如果还分别配置 A/B/M 三种兼容模式，则最多执行 **216 次**。
 
 测试矩阵：
 
@@ -373,9 +384,22 @@ python -m pytest gaussdb_sqlalchemy/tests -v -rs
 
 - `test_runtime_driver_and_architecture`
 - `test_live_select_and_compatibility_detection`
+- `test_bound_parameters_and_scalar_results`
 - `test_core_create_insert_query_reflect_drop`
 - `test_transaction_rollback`
+- `test_transaction_commit_persists_data`
+- `test_savepoint_rollback_keeps_outer_transaction`
+- `test_unicode_null_empty_and_long_text_round_trip`
+- `test_numeric_boolean_date_datetime_round_trip`
+- `test_binary_round_trip`
+- `test_executemany_update_and_delete`
+- `test_primary_key_and_column_reflection`
+- `test_index_reflection`
+- `test_unique_constraint_and_integrity_error`
+- `test_statement_error_then_connection_rollback_and_reuse`
+- `test_connection_pool_repeated_checkouts`
 - `test_orm_crud`
+- `test_orm_filter_order_count_and_limit`
 
 如果同时配置 psycopg3 和 psycopg2 两个 URL，每个场景会分别执行一遍。pytest `-v` 输出中的用例参数会带上环境变量名、驱动类型和架构，例如：
 
@@ -388,8 +412,12 @@ GAUSSDB_SQLALCHEMY_PSYCOPG2_ARM_URL:psycopg2:arm64
 
 ```text
 gaussdb_sqlalchemy/tests/test_dialect_integration.py::test_live_select_and_compatibility_detection[...] PASSED
+gaussdb_sqlalchemy/tests/test_dialect_integration.py::test_bound_parameters_and_scalar_results[...] PASSED
 gaussdb_sqlalchemy/tests/test_dialect_integration.py::test_core_create_insert_query_reflect_drop[...] PASSED
 gaussdb_sqlalchemy/tests/test_dialect_integration.py::test_transaction_rollback[...] PASSED
+gaussdb_sqlalchemy/tests/test_dialect_integration.py::test_savepoint_rollback_keeps_outer_transaction[...] PASSED
+gaussdb_sqlalchemy/tests/test_dialect_integration.py::test_numeric_boolean_date_datetime_round_trip[...] PASSED
+gaussdb_sqlalchemy/tests/test_dialect_integration.py::test_index_reflection[...] PASSED
 gaussdb_sqlalchemy/tests/test_dialect_integration.py::test_orm_crud[...] PASSED
 ```
 

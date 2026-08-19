@@ -16,22 +16,31 @@ import os
 import platform
 import sys
 import uuid
+from datetime import date, datetime
 from decimal import Decimal
 
 import pytest
 from sqlalchemy import (
     Column,
+    Boolean,
+    Date,
     DateTime,
+    Index,
     Integer,
+    LargeBinary,
     MetaData,
     Numeric,
     String,
     Table,
+    Text,
+    UniqueConstraint,
     create_engine,
+    func,
     inspect,
     select,
     text,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, declarative_base
 
 
@@ -199,6 +208,18 @@ def test_live_select_and_compatibility_detection(engine):
 
 
 @pytest.mark.integration
+def test_bound_parameters_and_scalar_results(engine):
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("select :number as number_value, :message as message_value"),
+            {"number": 42, "message": "GaussDB 参数绑定"},
+        ).one()
+
+    assert row.number_value == 42
+    assert row.message_value == "GaussDB 参数绑定"
+
+
+@pytest.mark.integration
 def test_core_create_insert_query_reflect_drop(engine):
     table_name = _table_name("gdb_sa_live_core")
     metadata = MetaData()
@@ -264,6 +285,281 @@ def test_transaction_rollback(engine):
 
 
 @pytest.mark.integration
+def test_transaction_commit_persists_data(engine):
+    table_name = _table_name("gdb_sa_live_commit")
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("value", String(64), nullable=False),
+    )
+
+    _drop_table(engine, table_name)
+    try:
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(table.insert(), {"id": 1, "value": "committed"})
+
+        with engine.connect() as conn:
+            assert conn.execute(select(table.c.value)).scalar_one() == "committed"
+    finally:
+        _drop_table(engine, table_name)
+
+
+@pytest.mark.integration
+def test_savepoint_rollback_keeps_outer_transaction(engine):
+    table_name = _table_name("gdb_sa_live_savepoint")
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("value", String(64), nullable=False),
+    )
+
+    _drop_table(engine, table_name)
+    try:
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(table.insert(), {"id": 1, "value": "outer"})
+            nested = conn.begin_nested()
+            conn.execute(table.insert(), {"id": 2, "value": "savepoint"})
+            nested.rollback()
+            conn.execute(table.insert(), {"id": 3, "value": "after_savepoint"})
+
+        with engine.connect() as conn:
+            ids = conn.execute(select(table.c.id).order_by(table.c.id)).scalars().all()
+        assert ids == [1, 3]
+    finally:
+        _drop_table(engine, table_name)
+
+
+@pytest.mark.integration
+def test_unicode_null_empty_and_long_text_round_trip(engine):
+    table_name = _table_name("gdb_sa_live_text")
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("short_text", String(128)),
+        Column("long_text", Text),
+    )
+    long_value = "高斯数据库-" * 400
+
+    _drop_table(engine, table_name)
+    try:
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(
+                table.insert(),
+                [
+                    {"id": 1, "short_text": "中文🙂", "long_text": long_value},
+                    {"id": 2, "short_text": "", "long_text": None},
+                ],
+            )
+
+        with engine.connect() as conn:
+            rows = conn.execute(select(table).order_by(table.c.id)).mappings().all()
+        assert rows[0]["short_text"] == "中文🙂"
+        assert rows[0]["long_text"] == long_value
+        assert rows[1]["short_text"] == ""
+        assert rows[1]["long_text"] is None
+    finally:
+        _drop_table(engine, table_name)
+
+
+@pytest.mark.integration
+def test_numeric_boolean_date_datetime_round_trip(engine):
+    table_name = _table_name("gdb_sa_live_types")
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("amount", Numeric(12, 3), nullable=False),
+        Column("enabled", Boolean, nullable=False),
+        Column("business_date", Date, nullable=False),
+        Column("created_at", DateTime, nullable=False),
+    )
+    expected_datetime = datetime(2026, 8, 19, 10, 11, 12, 123000)
+
+    _drop_table(engine, table_name)
+    try:
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(
+                table.insert(),
+                {
+                    "id": 1,
+                    "amount": Decimal("12345.678"),
+                    "enabled": True,
+                    "business_date": date(2026, 8, 19),
+                    "created_at": expected_datetime,
+                },
+            )
+
+        with engine.connect() as conn:
+            row = conn.execute(select(table)).mappings().one()
+        assert row["amount"] == Decimal("12345.678")
+        assert bool(row["enabled"]) is True
+        assert row["business_date"] == date(2026, 8, 19)
+        assert row["created_at"] == expected_datetime
+    finally:
+        _drop_table(engine, table_name)
+
+
+@pytest.mark.integration
+def test_binary_round_trip(engine):
+    table_name = _table_name("gdb_sa_live_binary")
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("payload", LargeBinary, nullable=False),
+    )
+    expected = b"\x00\x01GaussDB\xff\x10"
+
+    _drop_table(engine, table_name)
+    try:
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(table.insert(), {"id": 1, "payload": expected})
+        with engine.connect() as conn:
+            actual = conn.execute(select(table.c.payload)).scalar_one()
+        assert bytes(actual) == expected
+    finally:
+        _drop_table(engine, table_name)
+
+
+@pytest.mark.integration
+def test_executemany_update_and_delete(engine):
+    table_name = _table_name("gdb_sa_live_batch")
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("value", Integer, nullable=False),
+    )
+
+    _drop_table(engine, table_name)
+    try:
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(
+                table.insert(),
+                [{"id": index, "value": index * 10} for index in range(1, 6)],
+            )
+            conn.execute(table.update().where(table.c.id >= 3).values(value=99))
+            conn.execute(table.delete().where(table.c.id == 1))
+
+        with engine.connect() as conn:
+            rows = conn.execute(
+                select(table.c.id, table.c.value).order_by(table.c.id)
+            ).all()
+        assert rows == [(2, 20), (3, 99), (4, 99), (5, 99)]
+    finally:
+        _drop_table(engine, table_name)
+
+
+@pytest.mark.integration
+def test_primary_key_and_column_reflection(engine):
+    table_name = _table_name("gdb_sa_live_pk")
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        Column("tenant_id", Integer, primary_key=True, autoincrement=False),
+        Column("item_id", Integer, primary_key=True, autoincrement=False),
+        Column("value", String(32), nullable=False),
+    )
+
+    _drop_table(engine, table_name)
+    try:
+        metadata.create_all(engine)
+        inspector = inspect(engine)
+        pk = inspector.get_pk_constraint(table_name)
+        columns = {column["name"]: column for column in inspector.get_columns(table_name)}
+        assert set(pk["constrained_columns"]) == {"tenant_id", "item_id"}
+        assert columns["value"]["nullable"] is False
+    finally:
+        _drop_table(engine, table_name)
+
+
+@pytest.mark.integration
+def test_index_reflection(engine):
+    table_name = _table_name("gdb_sa_live_index")
+    index_name = f"{table_name}_name_idx"
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("name", String(64), nullable=False),
+    )
+    Index(index_name, table.c.name)
+
+    _drop_table(engine, table_name)
+    try:
+        metadata.create_all(engine)
+        indexes = inspect(engine).get_indexes(table_name)
+        reflected = next(index for index in indexes if index["name"] == index_name)
+        assert reflected["column_names"] == ["name"]
+    finally:
+        _drop_table(engine, table_name)
+
+
+@pytest.mark.integration
+def test_unique_constraint_and_integrity_error(engine):
+    table_name = _table_name("gdb_sa_live_unique")
+    constraint_name = f"{table_name}_code_uq"
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("code", String(32), nullable=False),
+        UniqueConstraint("code", name=constraint_name),
+    )
+
+    _drop_table(engine, table_name)
+    try:
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(table.insert(), {"id": 1, "code": "same"})
+
+        with pytest.raises(IntegrityError):
+            with engine.begin() as conn:
+                conn.execute(table.insert(), {"id": 2, "code": "same"})
+
+        constraints = inspect(engine).get_unique_constraints(table_name)
+        assert any(set(item["column_names"]) == {"code"} for item in constraints)
+    finally:
+        _drop_table(engine, table_name)
+
+
+@pytest.mark.integration
+def test_statement_error_then_connection_rollback_and_reuse(engine):
+    with engine.connect() as conn:
+        with pytest.raises(Exception):
+            conn.execute(text("select * from gdb_sa_table_that_does_not_exist"))
+        conn.rollback()
+        assert conn.execute(text("select 1")).scalar_one() == 1
+
+
+@pytest.mark.integration
+def test_connection_pool_repeated_checkouts(engine):
+    for expected in range(1, 4):
+        with engine.connect() as conn:
+            assert conn.execute(
+                text("select :value"), {"value": expected}
+            ).scalar_one() == expected
+
+
+@pytest.mark.integration
 def test_orm_crud(engine):
     table_name = _table_name("gdb_sa_live_orm")
     Base = declarative_base()
@@ -293,5 +589,47 @@ def test_orm_crud(engine):
             session.delete(session.get(LiveItem, 1))
             session.commit()
             assert session.get(LiveItem, 1) is None
+    finally:
+        _drop_table(engine, table_name)
+
+
+@pytest.mark.integration
+def test_orm_filter_order_count_and_limit(engine):
+    table_name = _table_name("gdb_sa_live_orm_query")
+    Base = declarative_base()
+
+    class QueryItem(Base):
+        __tablename__ = table_name
+
+        id = Column(Integer, primary_key=True, autoincrement=False)
+        category = Column(String(32), nullable=False)
+        score = Column(Integer, nullable=False)
+
+    _drop_table(engine, table_name)
+    try:
+        Base.metadata.create_all(engine)
+        with Session(engine) as session:
+            session.add_all(
+                [
+                    QueryItem(id=1, category="A", score=10),
+                    QueryItem(id=2, category="B", score=30),
+                    QueryItem(id=3, category="A", score=20),
+                    QueryItem(id=4, category="A", score=40),
+                ]
+            )
+            session.commit()
+
+        with Session(engine) as session:
+            result = session.scalars(
+                select(QueryItem)
+                .where(QueryItem.category == "A")
+                .order_by(QueryItem.score.desc())
+                .limit(2)
+            ).all()
+            count = session.scalar(
+                select(func.count()).select_from(QueryItem).where(QueryItem.category == "A")
+            )
+        assert [item.score for item in result] == [40, 20]
+        assert count == 3
     finally:
         _drop_table(engine, table_name)

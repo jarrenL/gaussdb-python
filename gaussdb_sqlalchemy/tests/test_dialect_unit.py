@@ -138,6 +138,8 @@ class TestConnectArgs:
             import gaussdb
         except ImportError:
             pytest.skip("gaussdb (psycopg3) not installed")
+        if not hasattr(gaussdb, "ClientCursor"):
+            pytest.skip("gaussdb namespace exists but the psycopg3 driver is not loadable")
 
         from gaussdb_sqlalchemy.base import GaussDBDialect
         dialect = GaussDBDialect()
