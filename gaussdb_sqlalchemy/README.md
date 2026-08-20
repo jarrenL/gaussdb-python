@@ -294,8 +294,8 @@ engine = create_engine(
 
 本分支提供 SQLAlchemy 方言真实库测试：
 
-当前包含 18 类真实库基础测试；每个有效数据库 URL 执行 18 条，完整的
-psycopg2/psycopg3 × x86_64/ARM64 四组合矩阵最多执行 72 次。
+当前包含 26 类真实库基础测试；每个有效数据库 URL 执行 26 条，完整的
+psycopg2/psycopg3 × x86_64/ARM64 四组合矩阵最多执行 104 次。
 
 ```bash
 export GAUSSDB_SQLALCHEMY_PSYCOPG3_X86_URL='gaussdb://user:password@host:port/dbname?sslmode=disable'

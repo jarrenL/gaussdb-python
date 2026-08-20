@@ -18,16 +18,20 @@
 - SQLAlchemy Core 建表、插入、查询、反射、删表
 - Unicode、空字符串、NULL 和长文本往返
 - Numeric、Boolean、Date、DateTime 和二进制类型往返
+- BIGINT 边界、Float 和嵌套 JSON 类型往返
 - executemany 批量插入、UPDATE 和 DELETE
+- 查询结果字段顺序、mapping 和 rowcount
 - 事务提交、事务回滚和保存点回滚
 - 复合主键、字段、索引和唯一约束反射
-- 唯一约束冲突与连接错误恢复
-- 连接池重复签入/签出
+- 保留字字段引用、引号编译和反射
+- 唯一约束冲突、SQLSTATE 与连接错误恢复
+- 连接生命周期、连接池重复签入/签出
+- 同一参数SQL跨事务重复执行
 - SQLAlchemy ORM 增删改查、过滤、排序、聚合和 limit
 
-当前共有 **18 类真实库基础测试**。每配置一个有效的真实库 URL，就执行
-18 条；完整的 psycopg2/psycopg3 × x86_64/ARM64 四组合矩阵最多执行
-**72 次**。如果还分别配置 A/B/M 三种兼容模式，则最多执行 **216 次**。
+当前共有 **26 类真实库基础测试**。每配置一个有效的真实库 URL，就执行
+26 条；完整的 psycopg2/psycopg3 × x86_64/ARM64 四组合矩阵最多执行
+**104 次**。如果还分别配置 A/B/M 三种兼容模式，则最多执行 **312 次**。
 
 测试矩阵：
 
@@ -385,6 +389,11 @@ python -m pytest gaussdb_sqlalchemy/tests -v -rs
 - `test_runtime_driver_and_architecture`
 - `test_live_select_and_compatibility_detection`
 - `test_bound_parameters_and_scalar_results`
+- `test_bigint_boundaries_round_trip`
+- `test_float_values_round_trip`
+- `test_json_nested_values_round_trip`
+- `test_result_metadata_mappings_and_rowcount`
+- `test_quoted_reserved_identifier_and_reflection`
 - `test_core_create_insert_query_reflect_drop`
 - `test_transaction_rollback`
 - `test_transaction_commit_persists_data`
@@ -397,6 +406,9 @@ python -m pytest gaussdb_sqlalchemy/tests -v -rs
 - `test_index_reflection`
 - `test_unique_constraint_and_integrity_error`
 - `test_statement_error_then_connection_rollback_and_reuse`
+- `test_database_error_exposes_sqlstate`
+- `test_connection_close_and_new_checkout`
+- `test_repeated_parameter_execution_across_transactions`
 - `test_connection_pool_repeated_checkouts`
 - `test_orm_crud`
 - `test_orm_filter_order_count_and_limit`

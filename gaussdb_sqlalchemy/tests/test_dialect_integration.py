@@ -21,12 +21,15 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import (
-    Column,
+    BigInteger,
     Boolean,
+    Column,
     Date,
     DateTime,
+    Float,
     Index,
     Integer,
+    JSON,
     LargeBinary,
     MetaData,
     Numeric,
@@ -40,8 +43,9 @@ from sqlalchemy import (
     select,
     text,
 )
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError, ResourceClosedError
 from sqlalchemy.orm import Session, declarative_base
+from sqlalchemy.sql import quoted_name
 
 
 MATRIX_URL_ENV_KEYS = (
@@ -217,6 +221,160 @@ def test_bound_parameters_and_scalar_results(engine):
 
     assert row.number_value == 42
     assert row.message_value == "GaussDB 参数绑定"
+
+
+@pytest.mark.integration
+def test_bigint_boundaries_round_trip(engine):
+    table_name = _table_name("gdb_sa_live_bigint")
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("value", BigInteger, nullable=False),
+    )
+    expected = [-(2**63), 2**63 - 1]
+
+    _drop_table(engine, table_name)
+    try:
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(
+                table.insert(),
+                [{"id": index, "value": value} for index, value in enumerate(expected, 1)],
+            )
+        with engine.connect() as conn:
+            actual = conn.execute(
+                select(table.c.value).order_by(table.c.id)
+            ).scalars().all()
+        assert actual == expected
+        assert all(isinstance(value, int) for value in actual)
+    finally:
+        _drop_table(engine, table_name)
+
+
+@pytest.mark.integration
+def test_float_values_round_trip(engine):
+    table_name = _table_name("gdb_sa_live_float")
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("value", Float, nullable=False),
+    )
+    expected = [0.0, -123.5, 3.1415926, 1.25e6]
+
+    _drop_table(engine, table_name)
+    try:
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(
+                table.insert(),
+                [{"id": index, "value": value} for index, value in enumerate(expected, 1)],
+            )
+        with engine.connect() as conn:
+            actual = conn.execute(
+                select(table.c.value).order_by(table.c.id)
+            ).scalars().all()
+        assert actual == pytest.approx(expected)
+    finally:
+        _drop_table(engine, table_name)
+
+
+@pytest.mark.integration
+def test_json_nested_values_round_trip(engine):
+    table_name = _table_name("gdb_sa_live_json")
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("payload", JSON, nullable=False),
+    )
+    expected = {
+        "name": "GaussDB JSON 中文",
+        "enabled": True,
+        "count": 3,
+        "items": [1, "two", None, {"nested": "value"}],
+    }
+
+    _drop_table(engine, table_name)
+    try:
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(table.insert(), {"id": 1, "payload": expected})
+        with engine.connect() as conn:
+            actual = conn.execute(select(table.c.payload)).scalar_one()
+        assert actual == expected
+    finally:
+        _drop_table(engine, table_name)
+
+
+@pytest.mark.integration
+def test_result_metadata_mappings_and_rowcount(engine):
+    table_name = _table_name("gdb_sa_live_result")
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("name", String(32), nullable=False),
+    )
+
+    _drop_table(engine, table_name)
+    try:
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            insert_result = conn.execute(
+                table.insert(),
+                [{"id": 1, "name": "one"}, {"id": 2, "name": "two"}],
+            )
+            assert insert_result.rowcount == 2
+
+            update_result = conn.execute(table.update().values(name="updated"))
+            assert update_result.rowcount == 2
+
+            result = conn.execute(
+                select(table.c.id.label("item_id"), table.c.name).order_by(table.c.id)
+            )
+            assert list(result.keys()) == ["item_id", "name"]
+            rows = result.mappings().all()
+
+        assert rows == [
+            {"item_id": 1, "name": "updated"},
+            {"item_id": 2, "name": "updated"},
+        ]
+    finally:
+        _drop_table(engine, table_name)
+
+
+@pytest.mark.integration
+def test_quoted_reserved_identifier_and_reflection(engine):
+    table_name = _table_name("gdb_sa_live_quoted")
+    reserved_column = quoted_name("select", quote=True)
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column(reserved_column, String(64), nullable=False),
+    )
+
+    _drop_table(engine, table_name)
+    try:
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(table.insert(), {"id": 1, "select": "quoted-value"})
+        with engine.connect() as conn:
+            assert conn.execute(select(table.c["select"])).scalar_one() == "quoted-value"
+
+        column_names = {
+            column["name"] for column in inspect(engine).get_columns(table_name)
+        }
+        assert "select" in column_names
+    finally:
+        _drop_table(engine, table_name)
 
 
 @pytest.mark.integration
@@ -548,6 +706,52 @@ def test_statement_error_then_connection_rollback_and_reuse(engine):
             conn.execute(text("select * from gdb_sa_table_that_does_not_exist"))
         conn.rollback()
         assert conn.execute(text("select 1")).scalar_one() == 1
+
+
+@pytest.mark.integration
+def test_database_error_exposes_sqlstate(engine):
+    with engine.connect() as conn:
+        with pytest.raises(DBAPIError) as exc_info:
+            conn.execute(text("select * from gdb_sa_missing_table_for_sqlstate"))
+        conn.rollback()
+
+    original = exc_info.value.orig
+    sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+    assert sqlstate is not None
+    assert str(sqlstate).startswith("42")
+
+
+@pytest.mark.integration
+def test_connection_close_and_new_checkout(engine):
+    conn = engine.connect()
+    assert conn.execute(text("select 1")).scalar_one() == 1
+    conn.close()
+
+    assert conn.closed is True
+    with pytest.raises(ResourceClosedError):
+        conn.execute(text("select 1"))
+
+    with engine.connect() as replacement:
+        assert replacement.execute(text("select 2")).scalar_one() == 2
+
+
+@pytest.mark.integration
+def test_repeated_parameter_execution_across_transactions(engine):
+    with engine.connect() as conn:
+        first_values = [
+            conn.execute(text("select :value"), {"value": value}).scalar_one()
+            for value in range(12)
+        ]
+        conn.commit()
+
+        second_values = [
+            conn.execute(text("select :value"), {"value": value}).scalar_one()
+            for value in range(12, 24)
+        ]
+        conn.rollback()
+
+    assert first_values == list(range(12))
+    assert second_values == list(range(12, 24))
 
 
 @pytest.mark.integration
