@@ -66,25 +66,27 @@ git switch feature/sqlalchemy-dialect-psycopg2-psycopg3
 
 ### 2.2 Python 环境
 
-建议优先使用 Python 3.11。当前本季 psycopg2 路线以 GaussDB 507 驱动包内置 whl 为准，不以 PyPI 公共 `psycopg2` / `psycopg2-binary` 为准。
+建议优先使用 Python 3.11。psycopg2 路线以仓库随附的 GaussDB 官方 wheel
+为准，不使用 PyPI 公共 `psycopg2` / `psycopg2-binary`。
 
 Python 版本支持验证结论：
 
 | Python 版本 | SQLAlchemy 方言包 | psycopg3 / gaussdb 路线 | psycopg2 路线 |
 |-------------|-------------------|--------------------------|---------------|
-| 3.8 | 可安装 | PyPI `gaussdb>=1.0.4` 不声明支持；如需验证需使用内网提供的 3.8 兼容 gaussdb 包或源码包 | 当前 507 原始 whl 不支持 |
-| 3.9 | 可安装 | 支持 | 当前 507 原始 whl 不支持 |
-| 3.10 | 可安装 | 支持 | 当前 507 原始 whl 不支持 |
-| 3.11 | 已本地验证单元测试通过 | 支持 | 当前 507 原始 whl 支持，需按 CPU 架构选择 x86_64 或 aarch64 whl |
-| 3.12 | 已本地验证单元测试通过 | 支持 | 当前 507 原始 whl 不支持 |
+| 3.8 | 不支持 | 不在当前方言交付范围 | 不支持 |
+| 3.9 | 支持 | 支持 | 随附 wheel 不支持 |
+| 3.10 | 支持 | 支持 | 随附 wheel 不支持 |
+| 3.11 | 支持，单元测试已验证 | 支持 | 支持，需按 CPU 架构选择 x86_64 或 aarch64 wheel |
+| 3.12 | 支持，单元测试已验证 | 支持 | 随附 wheel 不支持 |
 
 说明：
 
-- 本季 psycopg2 交付物来自 GaussDB 507 驱动包，包名为 `GaussDB_Kernel_507_0_0`，版本 `2.9.10`，导出的 Python 顶层包为 `psycopg2`。
-- 当前已检查到的 507 原始 whl 只有两个标签：`py311-none-linux_x86_64` 和 `py311-none-linux_aarch64`。
-- 这两个 507 whl 的 metadata 虽然写了 `Requires-Python: >=3.8`，但 wheel tag 是 `py311`，测试验收应以实际 whl tag 为准，即只声明 Python 3.11。
-- 如需验证 Python 3.8、3.9、3.10 或 3.12 的 psycopg2 路线，需要先由驱动侧提供对应 Python 版本和 CPU 架构的 GaussDB 507 psycopg2 whl。
-- psycopg3 路线依赖 `gaussdb` 包。公开 PyPI `gaussdb 1.0.4` 声明 Python >=3.9；如果必须验证 Python 3.8，需要内网提供兼容 Python 3.8 的 `gaussdb` 包或从当前源码构建。
+- psycopg2 官方 wheel 安装后导出的 Python 顶层包为 `psycopg2`。
+- 当前随附 wheel 只有 `py311-none-linux_x86_64` 和
+  `py311-none-linux_aarch64` 两类，测试验收以 wheel tag 为准。
+- 其他 Python 版本的 psycopg2 路线，需要驱动侧提供对应 Python 版本、
+  Linux 平台和 CPU 架构的官方 wheel，并重新执行全部真实库测试。
+- psycopg3 路线依赖 `gaussdb>=1.0.4`，要求 Python 3.9+。
 
 ```bash
 python --version
@@ -109,6 +111,21 @@ python -m pip install --upgrade pip
 python -m pip install -e "./gaussdb_sqlalchemy[test]"
 ```
 
+测试所需内容及来源：
+
+| 内容 | 是否已在仓库 | 获取或配置方式 |
+|------|---------------|----------------|
+| 方言源码 | 是 | `gaussdb_sqlalchemy/` |
+| 单元和真实库测试 | 是 | `gaussdb_sqlalchemy/tests/` |
+| pytest、SQLAlchemy、Alembic | 否 | 安装 `./gaussdb_sqlalchemy[test]` 时由 pip 获取；内网需提前同步这些 Python 包 |
+| psycopg3 驱动 `gaussdb` | 是（源码） | 可从本仓库 `gaussdb/` 安装；也可从 PyPI/内网制品库安装 `gaussdb>=1.0.4` |
+| psycopg2 官方 wheel | 是 | `gaussdb_sqlalchemy/vendor/gaussdb_psycopg2/`，按 CPU 架构二选一 |
+| GaussDB 地址和测试账号 | 否 | 测试人员通过环境变量提供，禁止写入仓库 |
+
+完全离线测试前，还需要把 SQLAlchemy、Alembic、pytest 及其依赖同步到内网
+Python 制品库或 wheelhouse。数据库地址、用户名和密码属于环境配置，不应提交
+到 Git。
+
 按需要安装底层驱动。
 
 psycopg3 路线：
@@ -123,102 +140,28 @@ python -m pip install -e "./gaussdb_sqlalchemy[psycopg3]"
 psycopg2 路线：
 
 ```bash
-python -m pip install gaussdb_sqlalchemy/vendor/gaussdb507_psycopg2/GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_对应CPU架构.whl
+python -m pip install gaussdb_sqlalchemy/vendor/gaussdb_psycopg2/*-py311-none-linux_对应CPU架构.whl
 python -m pip install -e "./gaussdb_sqlalchemy[test]"
 ```
 
-当前已检查到的 507 原始 whl：
+仓库随附两个 GaussDB 官方 psycopg2 wheel：
 
 ```text
-GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_x86_64.whl
-GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_aarch64.whl
+*-py311-none-linux_x86_64.whl
+*-py311-none-linux_aarch64.whl
 ```
 
-psycopg2 路线需要安装与当前机器匹配的 GaussDB 507 whl 包，至少要匹配：
+psycopg2 路线需要安装与当前机器匹配的 GaussDB 官方 wheel，至少要匹配：
 
 - Python 版本：当前仅 `py311`
 - 操作系统：当前仅 Linux
 - CPU 架构，例如 x86_64、aarch64、arm64
 
-### 2.4 自行构建其他 Python 版本的 psycopg2 whl
-
-如果测试目标是 Python 3.8、3.9、3.10 或 3.12，当前 507 原始 whl 不能直接安装。需要由驱动构建方在对应 Python 版本和 CPU 架构的 Linux 环境中重新编译 `_psycopg.so`，再产出新的 GaussDB 507 psycopg2 whl。
-
-构建输入：
-
-- 当前 507 原始 whl，用于提取 `gaussdb_psycopg2.lib/` 下的 `libpq.so.5.5` 和相关依赖库。
-- psycopg2 `2.9.10` 源码。
-- 目标 Python 版本的解释器和开发头文件。
-- GaussDB/libpq 兼容编译头文件，至少需要 `libpq-fe.h`。
-- gcc/g++、setuptools、wheel。
-
-构建原则：
-
-```text
-不能复用 py311 的 _psycopg.so。
-不能只修改 whl 文件名。
-必须用目标 Python 版本重新编译 C 扩展。
-必须在目标 CPU 架构上构建或使用对应架构的交叉编译环境。
-```
-
-参考命令：
-
-```bash
-export PY_BIN=python3.10
-export GAUSSDB_507_WHL=/path/to/GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_x86_64.whl
-export BUILD_DIR=/tmp/gaussdb-psycopg2-build
-
-mkdir -p "$BUILD_DIR"
-$PY_BIN -m zipfile -e "$GAUSSDB_507_WHL" "$BUILD_DIR/whl"
-mkdir -p "$BUILD_DIR/libpq"
-cp "$BUILD_DIR"/whl/gaussdb_psycopg2.lib/* "$BUILD_DIR/libpq/"
-
-cd "$BUILD_DIR"
-$PY_BIN -m pip download psycopg2==2.9.10 --no-binary=:all: --no-deps
-tar -xf psycopg2-2.9.10*.tar.gz
-
-mkdir -p "$BUILD_DIR/bin"
-cat > "$BUILD_DIR/bin/pg_config" <<'EOF'
-#!/bin/sh
-case "$1" in
-  --includedir|--includedir-server) echo "$GAUSSDB_LIBPQ_INCLUDE" ;;
-  --libdir) echo "$GAUSSDB_LIBPQ_LIB" ;;
-  --version) echo "GaussDB 507.0.0" ;;
-  *) echo "" ;;
-esac
-EOF
-chmod +x "$BUILD_DIR/bin/pg_config"
-
-export GAUSSDB_LIBPQ_INCLUDE=/path/to/libpq/include
-export GAUSSDB_LIBPQ_LIB="$BUILD_DIR/libpq"
-export PATH="$BUILD_DIR/bin:$PATH"
-export LD_LIBRARY_PATH="$BUILD_DIR/libpq:${LD_LIBRARY_PATH:-}"
-
-cd "$BUILD_DIR"/psycopg2-2.9.10*
-$PY_BIN -m pip wheel . --no-deps -w "$BUILD_DIR/output"
-```
-
-构建后检查：
-
-```bash
-$PY_BIN -m pip install "$BUILD_DIR"/output/*.whl
-$PY_BIN -c "import psycopg2; print(psycopg2.__version__)"
-$PY_BIN -m pytest gaussdb_sqlalchemy/tests/test_dialect_integration.py -v -rs
-```
-
-验收要求：
-
-- wheel 文件名或 tag 能体现目标 Python 版本和 CPU 架构。
-- `_psycopg.so` 是目标 Python 版本重新编译的结果。
-- 安装后 `import psycopg2` 成功。
-- `_psycopg.so` 运行时能找到 GaussDB `libpq`；可以将 `.so` 打包进 wheel 的 `gaussdb_psycopg2.lib/`，或在运行环境配置 `LD_LIBRARY_PATH`。
-- 使用 `gaussdb+psycopg2://` 连接串执行真实库测试通过。
-
 如果要一次验证两条路线：
 
 ```bash
 python -m pip install gaussdb
-python -m pip install gaussdb_sqlalchemy/vendor/gaussdb507_psycopg2/GaussDB_Kernel_507_0_0-2.9.10-py311-none-linux_对应CPU架构.whl
+python -m pip install gaussdb_sqlalchemy/vendor/gaussdb_psycopg2/*-py311-none-linux_对应CPU架构.whl
 python -m pip install -e "./gaussdb_sqlalchemy[test,psycopg3]"
 ```
 
@@ -464,8 +407,11 @@ python -m pip install -e "./gaussdb_sqlalchemy[psycopg3]"
 
 处理：
 
+安装仓库中与当前 Python 和 CPU 架构匹配的 GaussDB 官方 wheel，不要安装
+公共 `psycopg2-binary`：
+
 ```bash
-python -m pip install -e "./gaussdb_sqlalchemy[psycopg2]"
+python -m pip install gaussdb_sqlalchemy/vendor/gaussdb_psycopg2/*-py311-none-linux_对应CPU架构.whl
 ```
 
 或只配置 `gaussdb://` / `gaussdb+psycopg://` URL，改测 psycopg3 路线。
@@ -491,9 +437,10 @@ python -m pip install -e "./gaussdb_sqlalchemy[psycopg2]"
 
 1. 确认分支为 feature/sqlalchemy-dialect-psycopg2-psycopg3。
 2. 创建 Python 虚拟环境。
-3. 安装 ./gaussdb_sqlalchemy[test,psycopg3,psycopg2]。
+3. 安装 ./gaussdb_sqlalchemy[test,psycopg3]。
    - psycopg3 使用 pip install gaussdb
-   - psycopg2 使用当前 Python 版本和 CPU 架构匹配的 whl 包
+   - psycopg2 使用 gaussdb_sqlalchemy/vendor/gaussdb_psycopg2/ 中与
+     Python 版本和 CPU 架构匹配的官方 wheel，不安装公共 psycopg2-binary
 4. 根据实际数据库信息和机器架构设置以下环境变量中的一个或多个：
    - GAUSSDB_SQLALCHEMY_PSYCOPG3_X86_URL
    - GAUSSDB_SQLALCHEMY_PSYCOPG3_ARM_URL

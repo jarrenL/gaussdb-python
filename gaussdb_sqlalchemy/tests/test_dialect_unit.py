@@ -315,6 +315,15 @@ class TestMCompatTypeCompiler:
         result = tc.process(sqltypes.DateTime())
         assert "TIMESTAMP(6)" in result.upper()
 
+    def test_m_mode_timestamp_rejects_timezone_semantics(self):
+        """M mode must not silently discard timezone=True."""
+        from sqlalchemy.dialects.postgresql import TIMESTAMP
+        from sqlalchemy.exc import CompileError
+
+        dialect = self._make_dialect("M")
+        with pytest.raises(CompileError, match="timezone-aware"):
+            dialect.type_compiler_instance.process(TIMESTAMP(timezone=True))
+
     def test_a_mode_timestamp_no_precision(self):
         """A mode should NOT force TIMESTAMP(6)."""
         from sqlalchemy import types as sqltypes
@@ -409,59 +418,54 @@ class TestCompatDetection:
 
     def test_detect_m_from_datcompatibility(self):
         """Should detect M mode when datcompatibility = 'M'."""
-        from gaussdb_sqlalchemy.base import _detect_compatibility, _COMPAT_CACHE
+        from gaussdb_sqlalchemy.base import _detect_compatibility
 
         mock_conn = MagicMock()
         mock_execute = MagicMock()
         mock_execute.scalar_one.return_value = "M"
         mock_conn.execute.return_value = mock_execute
 
-        _COMPAT_CACHE.clear()  # Clear cache
         result = _detect_compatibility(mock_conn)
         assert result == "M"
 
     def test_detect_a_from_pg(self):
         """Should detect A mode when datcompatibility = 'PG' (treated as A)."""
-        from gaussdb_sqlalchemy.base import _detect_compatibility, _COMPAT_CACHE
+        from gaussdb_sqlalchemy.base import _detect_compatibility
 
         mock_conn = MagicMock()
         mock_execute = MagicMock()
         mock_execute.scalar_one.return_value = "PG"
         mock_conn.execute.return_value = mock_execute
 
-        _COMPAT_CACHE.clear()
         result = _detect_compatibility(mock_conn)
         assert result == "A"
 
     def test_detect_b(self):
         """Should detect B mode."""
-        from gaussdb_sqlalchemy.base import _detect_compatibility, _COMPAT_CACHE
+        from gaussdb_sqlalchemy.base import _detect_compatibility
 
         mock_conn = MagicMock()
         mock_execute = MagicMock()
         mock_execute.scalar_one.return_value = "B"
         mock_conn.execute.return_value = mock_execute
 
-        _COMPAT_CACHE.clear()
         result = _detect_compatibility(mock_conn)
         assert result == "B"
 
-    def test_detect_defaults_to_a_on_error(self):
-        """Should default to A mode when query fails."""
-        from gaussdb_sqlalchemy.base import _detect_compatibility, _COMPAT_CACHE
+    def test_detect_fails_explicitly_on_error(self):
+        """A failed query must not silently select the wrong mode."""
+        from gaussdb_sqlalchemy.base import _detect_compatibility
+        from sqlalchemy.exc import InvalidRequestError
 
         mock_conn = MagicMock()
         mock_conn.execute.side_effect = Exception("query failed")
 
-        _COMPAT_CACHE.clear()
-        result = _detect_compatibility(mock_conn)
-        assert result == "A"
+        with pytest.raises(InvalidRequestError, match="datcompatibility"):
+            _detect_compatibility(mock_conn)
 
-    def test_detect_caches_result(self):
-        """Should cache the result per engine URL."""
-        from gaussdb_sqlalchemy.base import _detect_compatibility, _COMPAT_CACHE
-
-        _COMPAT_CACHE.clear()
+    def test_detect_does_not_cache_by_url(self):
+        """Each database connection is detected independently."""
+        from gaussdb_sqlalchemy.base import _detect_compatibility
 
         mock_conn = MagicMock()
         mock_engine = MagicMock()
@@ -476,11 +480,134 @@ class TestCompatDetection:
         result1 = _detect_compatibility(mock_conn)
         assert result1 == "M"
 
-        # Second call should use cache, not query again
+        mock_execute.scalar_one.return_value = "B"
         result2 = _detect_compatibility(mock_conn)
-        assert result2 == "M"
-        # execute should only be called once (first call)
-        assert mock_conn.execute.call_count == 1
+        assert result2 == "B"
+        assert mock_conn.execute.call_count == 2
+
+
+class TestRegressionFixes:
+    """Focused tests for bugs found during the delivery audit."""
+
+    def _m_dialect(self):
+        from gaussdb_sqlalchemy.base import GaussDBDialect_psycopg2
+
+        dialect = GaussDBDialect_psycopg2()
+        dialect.gaussdb_compatibility = "M"
+        dialect._apply_compatibility_features()
+        return dialect
+
+    def test_apply_features_replaces_real_identifier_preparer(self):
+        dialect = self._m_dialect()
+        assert dialect.identifier_preparer.initial_quote == "`"
+
+    def test_m_boolean_and_time_types(self):
+        from sqlalchemy import Boolean, Time
+
+        compiler = self._m_dialect().type_compiler_instance
+        assert compiler.process(Boolean()) == "SMALLINT"
+        assert compiler.process(Time()) == "TIME"
+
+    def test_m_bigint_autoincrement_preserves_width(self):
+        from sqlalchemy import BigInteger, Column, MetaData, Table
+        from sqlalchemy.schema import CreateTable
+
+        table = Table(
+            "audit_bigint", MetaData(),
+            Column("id", BigInteger, primary_key=True, autoincrement=True),
+        )
+        ddl = str(CreateTable(table).compile(dialect=self._m_dialect()))
+        assert "BIGINT NOT NULL AUTO_INCREMENT" in ddl
+        assert "id INTEGER" not in ddl
+
+    def test_two_operand_concat_uses_concat_function(self):
+        from sqlalchemy import column, select, String
+
+        expr = column("left_value", String) + column("right_value", String)
+        sql = str(select(expr).compile(dialect=self._m_dialect()))
+        assert "CONCAT(left_value, right_value)" in sql
+        assert " || " not in sql
+
+    def test_m_disables_all_returning_flags(self):
+        dialect = self._m_dialect()
+        assert dialect.insert_returning is False
+        assert dialect.update_returning is False
+        assert dialect.delete_returning is False
+
+    def test_conninfo_values_are_libpq_escaped(self):
+        from sqlalchemy.engine import URL
+        from gaussdb_sqlalchemy.base import GaussDBDialect_psycopg2
+
+        url = URL.create(
+            "gaussdb+psycopg2", username="user name",
+            password="pa ss'\\word", host="db host", database="test db",
+        )
+        args, _ = GaussDBDialect_psycopg2().create_connect_args(url)
+        assert "user='user name'" in args[0]
+        assert "password='pa ss\\'\\\\word'" in args[0]
+        assert "host='db host'" in args[0]
+        assert "dbname='test db'" in args[0]
+
+    def test_unknown_conninfo_option_is_rejected_clearly(self):
+        from sqlalchemy.engine import URL
+        from sqlalchemy.exc import ArgumentError
+        from gaussdb_sqlalchemy.base import GaussDBDialect_psycopg2
+
+        url = URL.create(
+            "gaussdb+psycopg2", host="db", database="test",
+            query={"unknown_option": "value"},
+        )
+        with pytest.raises(ArgumentError, match="unknown_option"):
+            GaussDBDialect_psycopg2().create_connect_args(url)
+
+    def test_m_isolation_uses_dbapi_cursor(self):
+        dialect = self._m_dialect()
+        connection = MagicMock()
+        cursor = connection.cursor.return_value
+
+        dialect.set_isolation_level(connection, "READ_COMMITTED")
+
+        connection.commit.assert_called_once_with()
+        cursor.execute.assert_called_once_with(
+            "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED"
+        )
+        cursor.close.assert_called_once_with()
+        connection.execute.assert_not_called()
+
+    def test_m_foreign_key_query_uses_referred_relation(self):
+        dialect = self._m_dialect()
+        dialect.default_schema_name = "public"
+        connection = MagicMock()
+        dialect._m_simple_query = MagicMock(return_value=[])
+
+        dialect.get_foreign_keys(connection, "child")
+
+        sql = dialect._m_simple_query.call_args.args[1]
+        assert "rn.nspname AS ref_schema" in sql
+        assert "rcl.relname AS ref_table" in sql
+
+    def test_alembic_column_type_uses_element_type(self):
+        from alembic.ddl.base import ColumnType
+        from sqlalchemy import BigInteger
+
+        dialect = self._m_dialect()
+        sql = str(ColumnType("t", "id", BigInteger()).compile(dialect=dialect))
+        assert sql == "ALTER TABLE t MODIFY COLUMN id BIGINT"
+
+    def test_alembic_rename_without_existing_type_is_not_noop(self):
+        from io import StringIO
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+
+        output = StringIO()
+        context = MigrationContext.configure(
+            dialect=self._m_dialect(),
+            opts={"as_sql": True, "output_buffer": output},
+        )
+        Operations(context).alter_column(
+            "account", "old_name", new_column_name="new_name"
+        )
+        assert "RENAME COLUMN old_name TO new_name" in output.getvalue()
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=49.2.0", "wheel"]
+requires = ["setuptools>=77.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,19 +7,16 @@ name = "gaussdb-sqlalchemy"
 version = "0.1.0"
 description = "SQLAlchemy dialect for Huawei GaussDB, built on the gaussdb (psycopg3 fork) driver."
 readme = "README.md"
-requires-python = ">=3.7"
-license = { text = "GNU Lesser General Public License v3 (LGPLv3)" }
+requires-python = ">=3.9"
+license = "LGPL-3.0-only"
 authors = [{ name = "GaussDB Python Driver Contributors" }]
 keywords = ["gaussdb", "sqlalchemy", "database", "driver", "dialect"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",
     "Operating System :: POSIX",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.7",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -37,7 +34,6 @@ psycopg3 = [
     "gaussdb>=1.0.4",
 ]
 psycopg2 = [
-    "psycopg2>=2.9.10",
 ]
 alembic = [
     "alembic>=1.13",
@@ -46,7 +42,6 @@ test = [
     "alembic>=1.13",
     "pytest>=6.2.5",
     "gaussdb>=1.0.4",
-    "psycopg2-binary>=2.9.10",
 ]
 
 [project.urls]

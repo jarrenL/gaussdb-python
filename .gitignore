@@ -17,6 +17,7 @@ htmlcov
 .pytest_cache
 .flake8
 .yamllint.yaml
+.DS_Store
 
 .eggs/
 dist/

@@ -17,24 +17,30 @@ from sqlalchemy.dialects.postgresql.base import (
     PGExecutionContext,
     PGCompiler,
 )
-from sqlalchemy import schema as sa_schema
 from sqlalchemy import types as sqltypes
 from sqlalchemy import text
-from sqlalchemy.sql import expression
+from sqlalchemy import exc as sa_exc
 from sqlalchemy.sql import operators
-from sqlalchemy.sql.compiler import OPERATORS
 from sqlalchemy.engine import reflection
 
 # ── compatibility detection ──────────────────────────────────────────────────
 
-_COMPAT_CACHE: dict[str, str] = {}
+_LIBPQ_CONNINFO_OPTIONS = {
+    "application_name", "channel_binding", "client_encoding",
+    "connect_timeout", "dbname", "fallback_application_name", "gssencmode",
+    "gsslib", "host", "hostaddr", "keepalives", "keepalives_count",
+    "keepalives_idle", "keepalives_interval", "krbsrvname",
+    "load_balance_hosts", "options", "passfile", "password", "port",
+    "replication", "requirepeer", "requiressl", "service", "servicefile",
+    "sslcert", "sslcompression", "sslcrl", "sslcrldir", "sslkey",
+    "ssl_max_protocol_version", "ssl_min_protocol_version", "sslmode",
+    "sslpassword", "sslrootcert", "sslsni", "target_session_attrs",
+    "tcp_user_timeout", "user",
+}
 
 
 def _detect_compatibility(connection) -> str:
     """Return 'A', 'B', or 'M' based on datcompatibility."""
-    cache_key = str(connection.engine.url)
-    if cache_key in _COMPAT_CACHE:
-        return _COMPAT_CACHE[cache_key]
     try:
         row = connection.execute(
             text(
@@ -44,13 +50,33 @@ def _detect_compatibility(connection) -> str:
         ).scalar_one()
         compat = str(row).strip().upper()[:1]
         if compat not in ("A", "B", "M", "P"):
-            compat = "A"
+            raise ValueError(f"unsupported datcompatibility value: {row!r}")
         if compat == "P":  # 'pg' mode → treat as A
             compat = "A"
-    except Exception:
-        compat = "A"
-    _COMPAT_CACHE[cache_key] = compat
+    except Exception as exc:
+        raise sa_exc.InvalidRequestError(
+            "Unable to detect GaussDB datcompatibility; refusing to assume "
+            "A mode because that can generate invalid SQL"
+        ) from exc
     return compat
+
+
+def _quote_conninfo_value(value) -> str:
+    """Quote one libpq conninfo value using PostgreSQL's DSN rules."""
+    value = str(value)
+    if value and not re.search(r"[\s'\\\\]", value):
+        return value
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _conninfo_part(key, value) -> str:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(key)):
+        raise sa_exc.ArgumentError(f"Invalid GaussDB connection option: {key!r}")
+    if key not in _LIBPQ_CONNINFO_OPTIONS:
+        raise sa_exc.ArgumentError(
+            f"Unsupported GaussDB/libpq connection option: {key!r}"
+        )
+    return f"{key}={_quote_conninfo_value(value)}"
 
 
 # ── Type compiler ────────────────────────────────────────────────────────────
@@ -62,9 +88,25 @@ class GaussDBTypeCompiler(PGTypeCompiler):
     def visit_TIMESTAMP(self, type_, **kw):
         compat = self.dialect.gaussdb_compatibility
         if compat == "M":
-            # M mode: always emit TIMESTAMP(6) for microsecond precision
-            return "TIMESTAMP(6)"
+            if getattr(type_, "timezone", False):
+                raise sa_exc.CompileError(
+                    "GaussDB M mode has no timezone-aware TIMESTAMP type"
+                )
+            precision = getattr(type_, "precision", None)
+            precision = precision if precision is not None else 6
+            return f"TIMESTAMP({precision})"
         return super().visit_TIMESTAMP(type_, **kw)
+
+    def visit_BOOLEAN(self, type_, **kw):
+        if self.dialect.gaussdb_compatibility == "M":
+            return "SMALLINT"
+        return super().visit_BOOLEAN(type_, **kw)
+
+    def visit_TIME(self, type_, **kw):
+        if self.dialect.gaussdb_compatibility == "M":
+            precision = getattr(type_, "precision", None)
+            return f"TIME({precision})" if precision is not None else "TIME"
+        return super().visit_TIME(type_, **kw)
 
     def visit_large_binary(self, type_, **kw):
         compat = self.dialect.gaussdb_compatibility
@@ -83,25 +125,14 @@ class GaussDBDDLCompiler(PGDDLCompiler):
         compat = self.dialect.gaussdb_compatibility
         # M mode: INTEGER AUTO_INCREMENT instead of SERIAL for PK
         if compat == "M" and column.autoincrement and column.primary_key:
-            if isinstance(column.type, sqltypes.Integer):
+            if isinstance(column.type, (sqltypes.SmallInteger, sqltypes.Integer, sqltypes.BigInteger)):
                 coltype = self.dialect.type_compiler_instance.process(
-                    sqltypes.Integer()
+                    column.type
                 )
                 default = " AUTO_INCREMENT"
                 colname = self.preparer.quote(column.name)
                 return f"{colname} {coltype} NOT NULL{default}"
         return super().get_column_specification(column, **kw)
-
-    def visit_create_table(self, create, **kw):
-        return super().visit_create_table(create, **kw)
-
-    def visit_column(self, column, **kw):
-        compat = self.dialect.gaussdb_compatibility
-        if compat == "M" and column.autoincrement and column.primary_key:
-            if isinstance(column.type, sqltypes.Integer):
-                # Already handled in get_column_specification
-                return self.get_column_specification(column, **kw)
-        return super().visit_column(column, **kw)
 
     def visit_alter_column(self, alter, **kw):
         compat = self.dialect.gaussdb_compatibility
@@ -167,6 +198,17 @@ class GaussDBCompiler(PGCompiler):
                 return self._m_concat(clauselist, **kw)
         return super().visit_expression_clauselist(clauselist, **kw)
 
+    def visit_binary(self, binary, override_operator=None, **kw):
+        operator = override_operator or binary.operator
+        if (
+            self.dialect.gaussdb_compatibility == "M"
+            and operator is operators.concat_op
+        ):
+            left = self.process(binary.left, **kw)
+            right = self.process(binary.right, **kw)
+            return f"CONCAT({left}, {right})"
+        return super().visit_binary(binary, override_operator=override_operator, **kw)
+
     def _m_concat(self, clauselist, **kw):
         args = []
         for clause in clauselist.clauses:
@@ -222,8 +264,6 @@ class GaussDBDialect(PGDialect):
 
     # Disable HSTORE (not assumed for lightweight GaussDB)
     use_native_hstore = False
-    postgresql_compat_version = (9, 2)
-
     # GaussDB compatibility mode: 'A', 'B', or 'M'
     gaussdb_compatibility = None
 
@@ -280,19 +320,19 @@ class GaussDBDialect(PGDialect):
         # Build conninfo string (works for both psycopg2 and psycopg3)
         parts = []
         if url.host:
-            parts.append(f"host={url.host}")
+            parts.append(_conninfo_part("host", url.host))
         if url.port:
-            parts.append(f"port={url.port}")
+            parts.append(_conninfo_part("port", url.port))
         if url.username:
-            parts.append(f"user={url.username}")
+            parts.append(_conninfo_part("user", url.username))
         if url.password:
-            parts.append(f"password={url.password}")
+            parts.append(_conninfo_part("password", url.password))
         if url.database:
-            parts.append(f"dbname={url.database}")
+            parts.append(_conninfo_part("dbname", url.database))
 
         # Pass through extra params (sslmode, etc.)
         for key, value in opts.items():
-            parts.append(f"{key}={value}")
+            parts.append(_conninfo_part(key, value))
 
         # Force UTF8 client encoding — GaussDB defaults to SQL_ASCII which
         # causes gaussdb/psycopg3 TextLoader to return bytes instead of str.
@@ -321,9 +361,6 @@ class GaussDBDialect(PGDialect):
             # DEALLOCATE ALL issue — just pass the conninfo string.
             return ([conninfo], {})
 
-    def do_execute(self, cursor, statement, parameters, context=None):
-        cursor.execute(statement, parameters)
-
     # ── Initialization ───────────────────────────────────────────────────────
 
     def _get_server_version_info(self, connection):
@@ -347,13 +384,18 @@ class GaussDBDialect(PGDialect):
         if self.gaussdb_compatibility == "M":
             # M mode: no RETURNING, use LAST_INSERT_ID
             self.insert_returning = False
+            self.update_returning = False
+            self.delete_returning = False
             self.postfetch_lastrowid = True
             self.execution_ctx_cls = GaussDBMExecutionContext
             # M mode: no native boolean (uses TINYINT)
             self.supports_native_boolean = False
         else:
             self.insert_returning = True
+            self.update_returning = True
+            self.delete_returning = True
             self.postfetch_lastrowid = False
+            self.execution_ctx_cls = PGExecutionContext
             self.supports_native_boolean = True
 
         # Re-create the identifier preparer now that gaussdb_compatibility
@@ -361,7 +403,7 @@ class GaussDBDialect(PGDialect):
         # (via super().initialize), before we set gaussdb_compatibility above,
         # so it defaults to PG-style double-quote quoting.  For M mode we need
         # backtick quoting.
-        self.preparer = GaussDBIdentifierPreparer(self)
+        self.identifier_preparer = GaussDBIdentifierPreparer(self)
 
     def _gaussdb_connection(self, dbapi_conn):
         """Return the underlying gaussdb Connection from a pool wrapper.
@@ -378,26 +420,12 @@ class GaussDBDialect(PGDialect):
         return dbapi_conn
 
     def _suppress_dealloc(self, dbapi_connection):
-        """Clear psycopg3's internal prepared-statement cache to prevent
-        DEALLOCATE ALL from being sent on commit/rollback.
+        """Compatibility no-op retained for older callers.
 
-        psycopg3 (gaussdb fork) maintains a prepared-statement cache that
-        triggers ``DEALLOCATE ALL`` on transaction boundaries.  M-compat
-        GaussDB rejects this syntax.  We clear the cache unconditionally
-        because the prepared-statement optimisation is not needed and
-        causes compatibility issues across all modes.
-
-        This is a no-op for psycopg2, which does not have prepared-statement
-        caching and never sends DEALLOCATE ALL.
+        Prepared statements are disabled through the public psycopg3
+        ``prepare_threshold=None`` connection option.  Do not mutate the
+        driver's private ``_prepared`` implementation here.
         """
-        if not self._is_psycopg3:
-            return
-        conn = self._gaussdb_connection(dbapi_connection)
-        prepared = getattr(conn, "_prepared", None)
-        if prepared is not None:
-            prepared._to_flush.clear()
-            prepared._counts.clear()
-            prepared._names.clear()
 
     def do_rollback(self, dbapi_connection):
         self._suppress_dealloc(dbapi_connection)
@@ -415,10 +443,16 @@ class GaussDBDialect(PGDialect):
             # M mode: COMMIT before SET to avoid transaction conflicts
             connection.commit()
             # M mode: no "AS" keyword in SET SESSION CHARACTERISTICS
-            level = level.upper().replace(" ", " ")
-            connection.execute(
-                text(f"SET SESSION TRANSACTION ISOLATION LEVEL {level}")
-            )
+            level = level.upper().replace("_", " ")
+            if level not in self.get_isolation_level_values(connection):
+                raise sa_exc.ArgumentError(f"Invalid isolation level {level!r}")
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    f"SET SESSION TRANSACTION ISOLATION LEVEL {level}"
+                )
+            finally:
+                cursor.close()
         else:
             super().set_isolation_level(connection, level)
 
@@ -482,8 +516,10 @@ class GaussDBDialect(PGDialect):
             text(sql_text),
             {"table_name": table_name, "schema": schema or "public"},
         )
-        cols = [row["column_name"] for row in result.mappings()]
-        return {"constrained_columns": cols, "name": None, "comment": None}
+        rows = list(result.mappings())
+        cols = [row["column_name"] for row in rows]
+        name = rows[0]["constraint_name"] if rows else None
+        return {"constrained_columns": cols, "name": name, "comment": None}
 
     def get_multi_pk_constraint(self, connection, schema=None, filter_names=None, scope=None, kind=None, **kw):
         """Override to avoid CAST AS TEXT in M-compat."""
@@ -744,12 +780,13 @@ class GaussDBDialect(PGDialect):
                    c.confkey,
                    c.conrelid,
                    c.confrelid,
-                   n.nspname AS ref_schema,
-                   cl.relname AS ref_table
+                   rn.nspname AS ref_schema,
+                   rcl.relname AS ref_table
             FROM pg_catalog.pg_constraint c
             JOIN pg_catalog.pg_class cl ON cl.oid = c.conrelid
             JOIN pg_catalog.pg_namespace n ON n.oid = cl.relnamespace
             JOIN pg_catalog.pg_class rcl ON rcl.oid = c.confrelid
+            JOIN pg_catalog.pg_namespace rn ON rn.oid = rcl.relnamespace
             WHERE c.contype = 'f'
               AND cl.relname = :table_name
               AND n.nspname = :schema
@@ -852,8 +889,6 @@ class GaussDBDialect(PGDialect):
 
     def _gaussdb_get_columns(self, connection, table_name, schema=None, **kw):
         """Custom column reflection that works across A/B/M compat modes."""
-        from sqlalchemy.dialects.postgresql.base import PGDialect
-
         compat = self.gaussdb_compatibility
         if schema is None:
             schema = self.default_schema_name
@@ -925,7 +960,7 @@ class GaussDBDialect(PGDialect):
 
         return columns
 
-    def _resolve_type(self, format_type, type_oid, compat):
+    def _resolve_type(self, format_type, _type_oid, compat):
         """Map a pg_catalog.format_type string to a SQLAlchemy type."""
         ft = format_type.lower().strip()
 
