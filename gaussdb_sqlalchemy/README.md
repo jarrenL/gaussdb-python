@@ -5,6 +5,8 @@ and **psycopg2** drivers.
 
 ## 前置条件
 
+Linux 部署和动态库加载请先阅读 [双驱动启动指导](docs/Linux双驱动启动.md)。
+
 - SQLAlchemy 方言支持 Python 3.9+
 - **当前随项目提供的 GaussDB 官方 psycopg2 驱动包仅支持 Python 3.11**；其他
   Python 版本不在当前 psycopg2 路线的交付支持范围内

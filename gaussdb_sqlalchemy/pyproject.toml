@@ -41,7 +41,6 @@ alembic = [
 test = [
     "alembic>=1.13",
     "pytest>=6.2.5",
-    "gaussdb>=1.0.4",
 ]
 
 [project.urls]

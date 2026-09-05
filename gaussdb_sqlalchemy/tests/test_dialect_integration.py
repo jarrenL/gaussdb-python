@@ -130,9 +130,9 @@ def _case_id(case: tuple[str, str]) -> str:
 
 def _require_driver(url: str) -> None:
     if url.startswith("gaussdb+psycopg2://"):
-        pytest.importorskip("psycopg2")
+        __import__("psycopg2")
     else:
-        pytest.importorskip("gaussdb")
+        __import__("gaussdb")
 
 
 @pytest.fixture(params=URL_CASES, ids=_case_id)

@@ -51,6 +51,12 @@ class PGresAttDesc(NamedTuple):
 
 @cache
 def find_libpq_full_path() -> str | None:
+    # Explicit client library for deployments without ldconfig/gcc discovery.
+    explicit = os.environ.get("GAUSSDB_LIBPQ_PATH")
+    if explicit:
+        if not os.path.isabs(explicit) or not os.path.isfile(explicit):
+            raise ImportError("GAUSSDB_LIBPQ_PATH must name an existing absolute library path")
+        return explicit
     if sys.platform == "win32":
         libname = ctypes.util.find_library("libpq.dll")
         if libname is None:
