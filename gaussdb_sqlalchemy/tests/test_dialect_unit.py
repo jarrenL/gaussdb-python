@@ -428,8 +428,8 @@ class TestCompatDetection:
         result = _detect_compatibility(mock_conn)
         assert result == "M"
 
-    def test_detect_a_from_pg(self):
-        """Should detect A mode when datcompatibility = 'PG' (treated as A)."""
+    def test_detect_pg_preserves_mode(self):
+        """PG has its own identity even when sharing the non-M SQL path."""
         from gaussdb_sqlalchemy.base import _detect_compatibility
 
         mock_conn = MagicMock()
@@ -438,7 +438,7 @@ class TestCompatDetection:
         mock_conn.execute.return_value = mock_execute
 
         result = _detect_compatibility(mock_conn)
-        assert result == "A"
+        assert result == "PG"
 
     def test_detect_b(self):
         """Should detect B mode."""

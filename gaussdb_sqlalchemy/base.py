@@ -3,7 +3,8 @@ SQLAlchemy dialect for GaussDB using the gaussdb (psycopg3 fork) DBAPI.
 
 This dialect connects to GaussDB via the gaussdb Python package (a fork of
 psycopg3 that uses libpq).  It auto-detects the database compatibility mode
-(A=Oracle, B=MySQL, M=MySQL) and adapts SQL generation accordingly.
+(A/ORA=Oracle, B/MYSQL=legacy MySQL, M=MySQL M-Compatibility, PG=PostgreSQL)
+and adapts SQL generation accordingly.
 """
 from __future__ import annotations
 
@@ -28,6 +29,12 @@ from .types import GaussDBBYTEA, GaussDBJSON, GaussDBJSONB, GaussDBLargeBinary
 
 # ── compatibility detection ──────────────────────────────────────────────────
 
+_COMPATIBILITY_NAMES = {
+    "A": "A", "ORA": "A",
+    "B": "B", "MYSQL": "B",
+    "M": "M", "PG": "PG",
+}
+
 _LIBPQ_CONNINFO_OPTIONS = {
     "application_name", "channel_binding", "client_encoding",
     "connect_timeout", "dbname", "fallback_application_name", "gssencmode",
@@ -43,7 +50,11 @@ _LIBPQ_CONNINFO_OPTIONS = {
 
 
 def _detect_compatibility(connection) -> str:
-    """Return 'A', 'B', or 'M' based on datcompatibility."""
+    """Normalize documented centralized/distributed catalog mode names.
+
+    MYSQL means B, not M. PG retains its identity even though it shares
+    the non-M SQL generation path. Unknown modes must not be guessed.
+    """
     try:
         row = connection.execute(
             text(
@@ -51,11 +62,11 @@ def _detect_compatibility(connection) -> str:
                 "where datname = current_database()"
             )
         ).scalar_one()
-        compat = str(row).strip().upper()[:1]
-        if compat not in ("A", "B", "M", "P"):
+        if isinstance(row, (bytes, bytearray, memoryview)):
+            row = bytes(row).decode("ascii")
+        if not isinstance(row, str) or row.strip().upper() not in _COMPATIBILITY_NAMES:
             raise ValueError(f"unsupported datcompatibility value: {row!r}")
-        if compat == "P":  # 'pg' mode → treat as A
-            compat = "A"
+        compat = _COMPATIBILITY_NAMES[row.strip().upper()]
     except Exception as exc:
         raise sa_exc.InvalidRequestError(
             "Unable to detect GaussDB datcompatibility; refusing to assume "
@@ -332,7 +343,7 @@ class GaussDBDialect(PGDialect):
 
     # Disable HSTORE (not assumed for lightweight GaussDB)
     use_native_hstore = False
-    # GaussDB compatibility mode: 'A', 'B', or 'M'
+    # Normalized GaussDB compatibility mode: 'A', 'B', 'M', or 'PG'
     gaussdb_compatibility = None
 
     # Register GaussDB M-compat binary types for reflection

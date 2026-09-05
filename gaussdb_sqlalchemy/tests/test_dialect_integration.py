@@ -207,8 +207,12 @@ def test_live_select_and_compatibility_detection(engine):
             )
         ).scalar_one()
 
-    assert str(compat).strip().upper()[:1] in {"A", "B", "M", "P"}
-    assert engine.dialect.gaussdb_compatibility in {"A", "B", "M"}
+    if isinstance(compat, (bytes, bytearray, memoryview)):
+        compat = bytes(compat).decode("ascii")
+    expected = {"A": "A", "ORA": "A", "B": "B", "MYSQL": "B", "M": "M", "PG": "PG"}
+    raw_mode = str(compat).strip().upper()
+    assert raw_mode in expected, f"Unsupported catalog mode: {compat!r}"
+    assert engine.dialect.gaussdb_compatibility == expected[raw_mode]
 
 
 @pytest.mark.integration

@@ -13,7 +13,7 @@
 - psycopg2 路线：底层使用 `psycopg2`
 - CPU 架构区分：`x86_64` 和 `arm64/aarch64`
 - 真实库连接、`select 1`、驱动与 CPU 架构识别
-- 数据库兼容模式识别：A/B/M/P
+- 数据库兼容模式识别：A/ORA→A、B/MYSQL→旧B、M→新MySQL M模式、PG→PG
 - 命名参数绑定和标量结果
 - SQLAlchemy Core 建表、插入、查询、反射、删表
 - Unicode、空字符串、NULL 和长文本往返
@@ -275,6 +275,12 @@ export GAUSSDB_SQLALCHEMY_TEST_URL_M='gaussdb://用户名:URL编码后的密码@
 ```
 
 如果要让 A/B/M 都走 psycopg2，把协议头改成 `gaussdb+psycopg2://`。
+
+变量名仅是测试标签，不会改变数据库实际模式。请先查询
+`select datcompatibility from pg_database where datname=current_database()`：
+`MYSQL` 表示旧 B 模式，`M` 才是新 MySQL M 模式；不能把两者混为一类。
+模式识别修复后的实际结果和当前全量复测阻碍见
+[模式识别修复验证](模式识别修复验证.md)。
 
 ### 3.5 多连接串入口
 

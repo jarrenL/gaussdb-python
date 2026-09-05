@@ -3,6 +3,24 @@
 SQLAlchemy dialect for Huawei GaussDB, supporting both **psycopg3** (gaussdb fork)
 and **psycopg2** drivers.
 
+## 兼容模式识别
+
+M 是新的 MySQL 兼容模式，B 是旧的 MySQL 兼容模式，两者不能混用。
+方言根据 `pg_database.datcompatibility` 的完整值识别，不按首字母猜测：
+
+| 系统表原始值 | 方言模式 | 含义 |
+|---|---|---|
+| A / ORA | A | Oracle 兼容 |
+| B / MYSQL | B | 旧 MySQL 兼容模式 |
+| M | M | 新 MySQL M-Compatibility 模式 |
+| PG | PG | PostgreSQL 兼容，身份不归并到 A |
+
+这里的 `MYSQL` 是系统表中的历史模式名称，不是泛指所有 MySQL 兼容模式。
+对应关系参见[官方建库说明](https://support.huaweicloud.com/centralized-ref-v10-gaussdb/gaussdb-38-0247.html)。
+未适配的 C/TD 或未知值会明确报错，不自动降级。
+识别正确不等于该模式已通过全量验收；当前验证边界见
+[模式识别修复验证](docs/模式识别修复验证.md)。
+
 ## 前置条件
 
 Linux 部署和动态库加载请先阅读 [双驱动启动指导](docs/Linux双驱动启动.md)。
