@@ -29,9 +29,15 @@
 - 同一参数SQL跨事务重复执行
 - SQLAlchemy ORM 增删改查、过滤、排序、聚合和 limit
 
-当前共有 **26 类真实库基础测试**。每配置一个有效的真实库 URL，就执行
-26 条；完整的 psycopg2/psycopg3 × x86_64/ARM64 四组合矩阵最多执行
-**104 次**。如果还分别配置 A/B/M 三种兼容模式，则最多执行 **312 次**。
+当前有 **26 类真实库基础测试 + 4 类专项回归测试**。每配置一个有效的真实库
+URL，两个测试文件共执行30条；完整的 psycopg2/psycopg3 × x86_64/ARM64
+四组合矩阵最多执行120次，分别配置 A/B/M 三种模式最多执行360次。
+
+专项回归位于 `tests/test_result_regressions_integration.py`：JSON对象及标量、
+自定义JSON解码器、二进制返回类型及内容、唯一约束与复合列顺序。唯一约束
+用例把默认分布键包含在约束中，避免依赖全局二级索引功能。
+
+本次修复及实际测试结果见[结果转换与约束反射修复验证](结果转换与约束反射修复验证.md)。
 
 测试矩阵：
 
@@ -309,7 +315,7 @@ python -c "from urllib.parse import quote_plus; print(quote_plus('你的密码')
 单元测试不连接真实数据库：
 
 ```bash
-python -m pytest gaussdb_sqlalchemy/tests/test_dialect_unit.py -v -rs
+python -m pytest gaussdb_sqlalchemy/tests -m 'not integration' -v -rs
 ```
 
 ### 4.2 真实库测试
@@ -317,7 +323,7 @@ python -m pytest gaussdb_sqlalchemy/tests/test_dialect_unit.py -v -rs
 真实库测试需要先配置至少一个 `GAUSSDB_SQLALCHEMY_*URL` 环境变量：
 
 ```bash
-python -m pytest gaussdb_sqlalchemy/tests/test_dialect_integration.py -v -rs
+python -m pytest gaussdb_sqlalchemy/tests -m integration -v -rs
 ```
 
 ### 4.3 SQLAlchemy 子包全部测试
@@ -453,8 +459,8 @@ python -m pip install gaussdb_sqlalchemy/vendor/gaussdb_psycopg2/*-py311-none-li
    - GAUSSDB_SQLALCHEMY_TEST_URL_B
    - GAUSSDB_SQLALCHEMY_TEST_URL_M
 5. 运行：
-   python -m pytest gaussdb_sqlalchemy/tests/test_dialect_unit.py -v -rs
-   python -m pytest gaussdb_sqlalchemy/tests/test_dialect_integration.py -v -rs
+   python -m pytest gaussdb_sqlalchemy/tests -m 'not integration' -v -rs
+   python -m pytest gaussdb_sqlalchemy/tests -m integration -v -rs
 6. 汇总 Python 版本、驱动版本、数据库版本、兼容模式、pytest 结果。
 7. 如失败，保留完整错误栈、连接串脱敏后的协议头和数据库兼容模式，不要输出真实密码。
 ```

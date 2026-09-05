@@ -322,8 +322,12 @@ engine = create_engine(
 
 本分支提供 SQLAlchemy 方言真实库测试：
 
-当前包含 26 类真实库基础测试；每个有效数据库 URL 执行 26 条，完整的
-psycopg2/psycopg3 × x86_64/ARM64 四组合矩阵最多执行 104 次。
+当前包含 26 类真实库基础测试和 4 类结果转换/约束反射回归测试；每个有效
+数据库 URL 执行 30 条，完整的 psycopg2/psycopg3 × x86_64/ARM64 四组合
+矩阵最多执行 120 次。
+
+JSON、二进制和约束反射的修复、实际验证范围及内网复测步骤见
+[结果转换与约束反射修复验证](docs/结果转换与约束反射修复验证.md)。
 
 ```bash
 export GAUSSDB_SQLALCHEMY_PSYCOPG3_X86_URL='gaussdb://user:password@host:port/dbname?sslmode=disable'
@@ -332,8 +336,8 @@ export GAUSSDB_SQLALCHEMY_PSYCOPG2_X86_URL='gaussdb+psycopg2://user:password@hos
 python -m pip install gaussdb
 python -m pip install gaussdb_sqlalchemy/vendor/gaussdb_psycopg2/<GaussDB官方psycopg2包名>-py311-none-linux_对应CPU架构.whl
 python -m pip install -e "./gaussdb_sqlalchemy[test,psycopg3]"
-python -m pytest gaussdb_sqlalchemy/tests/test_dialect_unit.py -v -rs
-python -m pytest gaussdb_sqlalchemy/tests/test_dialect_integration.py -v -rs
+python -m pytest gaussdb_sqlalchemy/tests -m 'not integration' -v -rs
+python -m pytest gaussdb_sqlalchemy/tests -m integration -v -rs
 ```
 
 用例支持四类矩阵变量：`GAUSSDB_SQLALCHEMY_PSYCOPG3_X86_URL`、`GAUSSDB_SQLALCHEMY_PSYCOPG3_ARM_URL`、`GAUSSDB_SQLALCHEMY_PSYCOPG2_X86_URL`、`GAUSSDB_SQLALCHEMY_PSYCOPG2_ARM_URL`。psycopg3 路线可直接安装 `gaussdb` 包；psycopg2 路线使用 GaussDB 官方驱动包内的 psycopg2 wheel，当前仅声明 `py311-none-linux_x86_64` 和 `py311-none-linux_aarch64` 两类。

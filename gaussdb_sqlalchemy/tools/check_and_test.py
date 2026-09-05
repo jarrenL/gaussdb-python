@@ -37,6 +37,7 @@ def main():
     import pytest
     raise SystemExit(pytest.main([
         str(root / "gaussdb_sqlalchemy/tests/test_dialect_integration.py"),
+        str(root / "gaussdb_sqlalchemy/tests/test_result_regressions_integration.py"),
         "-v", "-rs", *sys.argv[2:],
     ]))
 

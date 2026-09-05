@@ -22,6 +22,9 @@ from sqlalchemy import text
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.sql import operators
 from sqlalchemy.engine import reflection
+from sqlalchemy.dialects.postgresql import BYTEA, JSON, JSONB
+
+from .types import GaussDBBYTEA, GaussDBJSON, GaussDBJSONB, GaussDBLargeBinary
 
 # ── compatibility detection ──────────────────────────────────────────────────
 
@@ -77,6 +80,62 @@ def _conninfo_part(key, value) -> str:
             f"Unsupported GaussDB/libpq connection option: {key!r}"
         )
     return f"{key}={_quote_conninfo_value(value)}"
+
+
+def _parse_catalog_int_vector(value) -> list[int]:
+    """Normalize catalog int2[] / int2vector values without losing order.
+
+    DBAPIs return these as lists/tuples, PostgreSQL array text, or a
+    whitespace-separated int2vector. Some GaussDB builds also wrap array
+    values in square brackets, e.g. ``{[2]}`` or ``{[3,2]}``.
+    Invalid values must fail instead of silently dropping column numbers.
+    """
+    original = value
+
+    def invalid():
+        return ValueError(f"Invalid GaussDB catalog integer vector: {original!r}")
+
+    def decode(item):
+        if isinstance(item, (bytes, bytearray, memoryview)):
+            try:
+                return bytes(item).decode("ascii")
+            except UnicodeDecodeError as exc:
+                raise invalid() from exc
+        return item
+
+    integer = r"[+-]?[0-9]+"
+    value = decode(value)
+    if isinstance(value, (list, tuple)):
+        result = []
+        for item in value:
+            item = decode(item)
+            if type(item) is int:
+                result.append(item)
+            elif isinstance(item, str) and re.fullmatch(integer, item.strip()):
+                result.append(int(item))
+            else:
+                raise invalid()
+        return result
+    if not isinstance(value, str):
+        raise invalid()
+
+    body = value.strip()
+    if body.startswith("{"):
+        if not body.endswith("}"):
+            raise invalid()
+        body = body[1:-1].strip()
+    if body.startswith("[") and body.endswith("]") and body.count("[") == body.count("]") == 1:
+        body = body[1:-1].strip()
+    if not body:
+        return []
+    if re.fullmatch(rf"{integer}(?:\s+{integer})*", body):
+        return [int(item) for item in body.split()]
+
+    # Also accept individually bracketed elements: {[3],[2]}.
+    atom = rf"(?:{integer}|\[\s*{integer}\s*\])"
+    if re.fullmatch(rf"{atom}(?:\s*,\s*{atom})*", body):
+        return [int(item.strip().removeprefix("[").removesuffix("]")) for item in body.split(",")]
+    raise invalid()
 
 
 # ── Type compiler ────────────────────────────────────────────────────────────
@@ -253,6 +312,15 @@ class GaussDBDialect(PGDialect):
     preparer = GaussDBIdentifierPreparer
     statement_compiler = GaussDBCompiler
 
+    colspecs = dict(PGDialect.colspecs)
+    colspecs.update({
+        sqltypes.JSON: GaussDBJSON,
+        JSON: GaussDBJSON,
+        JSONB: GaussDBJSONB,
+        sqltypes.LargeBinary: GaussDBLargeBinary,
+        BYTEA: GaussDBBYTEA,
+    })
+
     supports_statement_cache = True
     supports_native_enum = True
     supports_native_boolean = True
@@ -362,6 +430,26 @@ class GaussDBDialect(PGDialect):
             return ([conninfo], {})
 
     # ── Initialization ───────────────────────────────────────────────────────
+
+    def on_connect(self):
+        # JSON is decoded by the DBAPI. Apply a user-supplied decoder there,
+        # scoped to this connection (never change process-global adapters).
+        parent = super().on_connect()
+        if self._json_deserializer is None:
+            return parent
+
+        def configure_json(connection):
+            if parent is not None:
+                parent(connection)
+            if self._is_psycopg3:
+                from gaussdb.types.json import set_json_loads
+                set_json_loads(self._json_deserializer, connection)
+            else:
+                from psycopg2.extras import register_default_json, register_default_jsonb
+                register_default_json(connection, loads=self._json_deserializer)
+                register_default_jsonb(connection, loads=self._json_deserializer)
+
+        return configure_json
 
     def _get_server_version_info(self, connection):
         """Return a conservative version tuple for PGDialect feature gating.
@@ -564,10 +652,7 @@ class GaussDBDialect(PGDialect):
         rows = self._m_simple_query(connection, sql_text, {"table_name": table_name, "schema": schema or "public"})
         result = []
         for r in rows:
-            conkey = r["conkey"]
-            if isinstance(conkey, (bytes, bytearray)):
-                conkey = conkey.decode()
-            attnums = [int(x) for x in str(conkey).strip("{}").split(",") if x.strip()]
+            attnums = _parse_catalog_int_vector(r["conkey"])
             col_names = []
             for attnum in attnums:
                 col_sql = "SELECT a.attname FROM pg_catalog.pg_attribute a WHERE a.attrelid = :relid AND a.attnum = :attnum"
@@ -625,10 +710,7 @@ class GaussDBDialect(PGDialect):
         rows = self._m_simple_query(connection, sql_text, {"table_name": table_name, "schema": schema or "public"})
         result = []
         for r in rows:
-            indkey = r["indkey"]
-            if isinstance(indkey, (bytes, bytearray)):
-                indkey = indkey.decode()
-            attnums = [int(x) for x in str(indkey).split() if x.strip()]
+            attnums = _parse_catalog_int_vector(r["indkey"])
             col_names = []
             for attnum in attnums:
                 if attnum == 0:
@@ -703,10 +785,7 @@ class GaussDBDialect(PGDialect):
         rows = self._m_simple_query(connection, sql_text, {"table_name": table_name, "schema": schema or "public"})
         result = []
         for r in rows:
-            indkey = r["indkey"]
-            if isinstance(indkey, (bytes, bytearray)):
-                indkey = indkey.decode()
-            attnums = [int(x) for x in str(indkey).split() if x.strip()]
+            attnums = _parse_catalog_int_vector(r["indkey"])
             col_names = []
             for attnum in attnums:
                 if attnum == 0:
@@ -794,14 +873,8 @@ class GaussDBDialect(PGDialect):
         rows = self._m_simple_query(connection, sql_text, {"table_name": table_name, "schema": schema or "public"})
         result = []
         for r in rows:
-            conkey = r["conkey"]
-            if isinstance(conkey, (bytes, bytearray)):
-                conkey = conkey.decode()
-            confkey = r["confkey"]
-            if isinstance(confkey, (bytes, bytearray)):
-                confkey = confkey.decode()
-            con_attnums = [int(x) for x in str(conkey).strip("{}").split(",") if x.strip()]
-            conf_attnums = [int(x) for x in str(confkey).strip("{}").split(",") if x.strip()]
+            con_attnums = _parse_catalog_int_vector(r["conkey"])
+            conf_attnums = _parse_catalog_int_vector(r["confkey"])
             constrained_cols = []
             referred_cols = []
             for attnum in con_attnums:
