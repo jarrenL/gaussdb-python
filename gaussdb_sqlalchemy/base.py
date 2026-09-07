@@ -23,6 +23,7 @@ from sqlalchemy import text
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.sql import operators
 from sqlalchemy.engine import reflection
+from sqlalchemy.engine.interfaces import ExecuteStyle
 from sqlalchemy.dialects.postgresql import BYTEA, JSON, JSONB
 
 from .types import GaussDBBYTEA, GaussDBJSON, GaussDBJSONB, GaussDBLargeBinary
@@ -286,10 +287,31 @@ class GaussDBCompiler(PGCompiler):
         return "CONCAT(" + ", ".join(args) + ")"
 
 
-# ── Execution context (M-compat lastrowid) ───────────────────────────────────
+# ── Execution contexts ──────────────────────────────────────────────────────
 
 
-class GaussDBMExecutionContext(PGExecutionContext):
+class GaussDBExecutionContext(PGExecutionContext):
+    """Preserve ordinary INSERT counts before the DBAPI cursor is closed."""
+
+    def post_exec(self):
+        super().post_exec()
+        # gaussdb resets cursor.rowcount on close. SQLAlchemy normally caches
+        # UPDATE/DELETE counts, but may close a non-returning INSERT cursor
+        # before the caller reads its count. Keep the actual server count,
+        # including zero/unknown (-1); parameter count is not a substitute.
+        # RETURNING and insertmanyvalues pagination retain SQLAlchemy's own
+        # result handling so a last-page count cannot become a batch total.
+        if (
+            self.isinsert
+            and not self._is_implicit_returning
+            and not self._is_explicit_returning
+            and self.execute_style is not ExecuteStyle.INSERTMANYVALUES
+            and self._rowcount is None
+        ):
+            self._rowcount = self.cursor.rowcount
+
+
+class GaussDBMExecutionContext(GaussDBExecutionContext):
     """Get auto-increment ID via LAST_INSERT_ID() in M-compat mode."""
 
     def get_lastrowid(self):
@@ -322,6 +344,7 @@ class GaussDBDialect(PGDialect):
     type_compiler = GaussDBTypeCompiler
     preparer = GaussDBIdentifierPreparer
     statement_compiler = GaussDBCompiler
+    execution_ctx_cls = GaussDBExecutionContext
 
     colspecs = dict(PGDialect.colspecs)
     colspecs.update({
@@ -494,7 +517,7 @@ class GaussDBDialect(PGDialect):
             self.update_returning = True
             self.delete_returning = True
             self.postfetch_lastrowid = False
-            self.execution_ctx_cls = PGExecutionContext
+            self.execution_ctx_cls = GaussDBExecutionContext
             self.supports_native_boolean = True
 
         # Re-create the identifier preparer now that gaussdb_compatibility
@@ -646,13 +669,17 @@ class GaussDBDialect(PGDialect):
     @reflection.cache
     def get_unique_constraints(self, connection, table_name, schema=None, **kw):
         compat = self.gaussdb_compatibility
-        if compat != "M":
+        if compat not in ("B", "M"):
             return super().get_unique_constraints(connection, table_name, schema, **kw)
         if schema is None:
             schema = self.default_schema_name
-        # M compat: avoid WITH ORDINALITY / generate_subscripts in JOIN
+        # The backing index may contain distributed system attributes which
+        # aren't part of the UNIQUE declaration. conkey is the logical key;
+        # PostgreSQL's reflection query expands the physical index's indkey.
+        # This simple query also avoids M-incompatible catalog SQL.
         sql_text = """
-            SELECT c.conname AS name, c.conkey, c.conrelid
+            SELECT c.conname AS name, c.conkey, c.conrelid,
+                   pg_catalog.obj_description(c.oid, 'pg_constraint') AS comment
             FROM pg_catalog.pg_constraint c
             JOIN pg_catalog.pg_class cl ON cl.oid = c.conrelid
             JOIN pg_catalog.pg_namespace n ON n.oid = cl.relnamespace
@@ -666,6 +693,8 @@ class GaussDBDialect(PGDialect):
             attnums = _parse_catalog_int_vector(r["conkey"])
             col_names = []
             for attnum in attnums:
+                if attnum <= 0:
+                    continue
                 col_sql = "SELECT a.attname FROM pg_catalog.pg_attribute a WHERE a.attrelid = :relid AND a.attnum = :attnum"
                 col_rows = self._m_simple_query(connection, col_sql, {"relid": r["conrelid"], "attnum": attnum})
                 if col_rows:
@@ -673,7 +702,11 @@ class GaussDBDialect(PGDialect):
                     if isinstance(name, (bytes, bytearray)):
                         name = name.decode()
                     col_names.append(name)
-            result.append({"name": r["name"], "column_names": col_names, "duplicates_index": None})
+            comment = r.get("comment")
+            if isinstance(comment, (bytes, bytearray, memoryview)):
+                comment = bytes(comment).decode()
+            result.append({"name": r["name"], "column_names": col_names,
+                           "duplicates_index": None, "comment": comment})
         return result
 
     @reflection.cache
@@ -724,7 +757,10 @@ class GaussDBDialect(PGDialect):
             attnums = _parse_catalog_int_vector(r["indkey"])
             col_names = []
             for attnum in attnums:
-                if attnum == 0:
+                # Negative numbers are system attributes (e.g. xc_node_hash,
+                # ctid); zero is the expression slot handled as before.
+                # Never filter by name: a positive attribute is a user column.
+                if attnum <= 0:
                     continue
                 col_sql = """
                     SELECT a.attname FROM pg_catalog.pg_attribute a
@@ -799,7 +835,9 @@ class GaussDBDialect(PGDialect):
             attnums = _parse_catalog_int_vector(r["indkey"])
             col_names = []
             for attnum in attnums:
-                if attnum == 0:
+                # Exclude physical system attributes, not same-named user
+                # columns. Preserve the existing treatment of expression slots.
+                if attnum <= 0:
                     continue
                 col_rows = self._m_simple_query(connection,
                     "SELECT a.attname FROM pg_catalog.pg_attribute a WHERE a.attrelid = :relid AND a.attnum = :attnum",
@@ -822,12 +860,12 @@ class GaussDBDialect(PGDialect):
         return result
 
     def get_multi_unique_constraints(self, connection, schema=None, filter_names=None, scope=None, kind=None, **kw):
-        """Override to avoid CAST AS TEXT in M-compat."""
+        """Use logical constraint keys consistently for B/M single and multi APIs."""
         compat = self.gaussdb_compatibility
-        if compat != "M":
+        if compat not in ("B", "M"):
             return super().get_multi_unique_constraints(connection, schema=schema, filter_names=filter_names, scope=scope, kind=kind, **kw)
 
-        if filter_names:
+        if filter_names is not None:
             table_names = filter_names
         else:
             table_names = self.get_table_names(connection, schema=schema, scope=scope, kind=kind, **kw)

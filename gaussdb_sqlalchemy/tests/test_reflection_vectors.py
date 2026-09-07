@@ -54,6 +54,7 @@ def test_unique_constraint_single_column_report_regression(dialect, conkey):
         "name": "uq_sample",
         "column_names": ["col_101_2"],
         "duplicates_index": None,
+        "comment": None,
     }]
     assert connection.lookups == [(101, 2)]
 
