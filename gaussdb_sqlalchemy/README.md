@@ -117,6 +117,10 @@ GaussDB-SQLAlchemy-Driver/
 
 ## 构建方言 wheel
 
+内网直接安装可下载已构建的[方言 wheel](packages/gaussdb_sqlalchemy-0.1.0-py3-none-any.whl)，
+无需在内网重新打包。校验值、对应源码提交和强制重装步骤见
+[预构建包说明](packages/README.md)。该文件只包含方言，不包含底层驱动或动态库。
+
 在仓库根目录执行：
 
 ```bash
